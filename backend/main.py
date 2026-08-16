@@ -1,13 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends
 from database import get_db
 
 app = FastAPI()
+
+# --- CORS: allow the frontend (local + deployed) to call this backend ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://helpdesk-agent-mahi-bhumika.vercel.app"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --- Pydantic model: defines the "shape" of a Document ---
 class Document(BaseModel):
@@ -15,13 +24,16 @@ class Document(BaseModel):
     title: str
     content: str
 
+
 # --- fake in-memory "database" for now (real Postgres comes in Week 2) ---
 fake_db = {}
 next_id = 1
 
+
 @app.get("/")
 def read_root():
     return {"status": "ok"}
+
 
 # GET — fetch a document by id
 @app.get("/documents/{doc_id}")
@@ -29,6 +41,7 @@ def get_document(doc_id: int):
     if doc_id not in fake_db:
         raise HTTPException(status_code=404, detail="Document not found")
     return fake_db[doc_id]
+
 
 # POST — create a new document
 @app.post("/documents")
@@ -39,6 +52,7 @@ def create_document(doc: Document):
     next_id += 1
     return doc
 
+
 # PUT — update an existing document
 @app.put("/documents/{doc_id}")
 def update_document(doc_id: int, doc: Document):
@@ -48,13 +62,12 @@ def update_document(doc_id: int, doc: Document):
     fake_db[doc_id] = doc
     return doc
 
+
 @app.get("/db-check")
 async def db_check(db: AsyncSession = Depends(get_db)):
     result = await db.execute(text("SELECT 1"))
     return {"database_connected": result.scalar() == 1}
 
-from pydantic import BaseModel
-from typing import Optional
 
 # --- Pydantic model matching the tenants table ---
 class TenantCreate(BaseModel):
@@ -64,6 +77,7 @@ class TenantCreate(BaseModel):
     bot_name: Optional[str] = None
     greeting_message: Optional[str] = None
     theme_color: Optional[str] = None
+
 
 @app.post("/tenants")
 async def create_tenant(tenant: TenantCreate, db: AsyncSession = Depends(get_db)):

@@ -3,9 +3,6 @@ import onnxruntime as ort
 from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
 
-from chunking import session, embed_chunks
-print(session.get_inputs())  # should print input names like input_ids, attention_mask
-print(embed_chunks(["This is a test sentence."])[0][:5])  # should print 5 floats
 
 MODEL_ID = "Xenova/all-MiniLM-L6-v2"  # pre-converted ONNX version of the same model
 

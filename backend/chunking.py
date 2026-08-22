@@ -1,13 +1,20 @@
-from sentence_transformers import SentenceTransformer
+import numpy as np
+import onnxruntime as ort
+from transformers import AutoTokenizer
+from huggingface_hub import hf_hub_download
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
-tokenizer = model.tokenizer
+from chunking import session, embed_chunks
+print(session.get_inputs())  # should print input names like input_ids, attention_mask
+print(embed_chunks(["This is a test sentence."])[0][:5])  # should print 5 floats
 
-def chunk_text(text: str, chunk_size: int = 250, overlap: int = 40) -> list[str]:
-    """
-    Split text into overlapping chunks, sized in real model tokens
-    (using the same tokenizer as the embedding model).
-    """
+MODEL_ID = "Xenova/all-MiniLM-L6-v2"  # pre-converted ONNX version of the same model
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+onnx_path = hf_hub_download(MODEL_ID, "onnx/model.onnx")
+session = ort.InferenceSession(onnx_path)
+
+
+def chunk_text(text: str, chunk_size: int = 250, overlap: int = 40, min_chunk_size: int = 20) -> list[str]:
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     if not token_ids:
         return []
@@ -17,8 +24,14 @@ def chunk_text(text: str, chunk_size: int = 250, overlap: int = 40) -> list[str]
     while start < len(token_ids):
         end = start + chunk_size
         chunk_ids = token_ids[start:end]
-        chunk_text_str = tokenizer.decode(chunk_ids)
-        chunks.append(chunk_text_str)
+
+        if end >= len(token_ids) and len(chunk_ids) < min_chunk_size and chunks:
+            prev_ids = tokenizer.encode(chunks[-1], add_special_tokens=False)
+            merged_ids = prev_ids + chunk_ids
+            chunks[-1] = tokenizer.decode(merged_ids)
+            break
+
+        chunks.append(tokenizer.decode(chunk_ids))
         if end >= len(token_ids):
             break
         start = end - overlap
@@ -26,23 +39,26 @@ def chunk_text(text: str, chunk_size: int = 250, overlap: int = 40) -> list[str]
     return chunks
 
 
+def _mean_pooling(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> np.ndarray:
+    mask = attention_mask[..., None].astype(np.float32)
+    summed = np.sum(token_embeddings * mask, axis=1)
+    counts = np.clip(mask.sum(axis=1), a_min=1e-9, a_max=None)
+    return summed / counts
+
+
 def embed_chunks(chunks: list[str]) -> list[list[float]]:
-    embeddings = model.encode(chunks, show_progress_bar=False)
+    inputs = tokenizer(chunks, padding=True, truncation=True, max_length=256, return_tensors="np")
+
+    onnx_input_names = {i.name for i in session.get_inputs()}
+    onnx_inputs = {k: v for k, v in inputs.items() if k in onnx_input_names}
+
+    outputs = session.run(None, onnx_inputs)
+    token_embeddings = outputs[0]  # shape: (batch, seq_len, 384)
+
+    embeddings = _mean_pooling(token_embeddings, inputs["attention_mask"])
+
+    # L2 normalize, matching what sentence-transformers does by default
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / norms
+
     return embeddings.tolist()
-
-
-if __name__ == "__main__":
-    sample_text = (
-        "To reset your password, go to Settings then Account. "
-        "Click Forgot Password and check your email for a reset link. "
-        "The link expires after 24 hours, so use it promptly."
-    )
-
-    chunks = chunk_text(sample_text, chunk_size=15, overlap=5)  # small values just to see multiple chunks on short text
-    print(f"Number of chunks: {len(chunks)}")
-    for i, c in enumerate(chunks):
-        print(f"\nChunk {i}: {c}")
-
-    embeddings = embed_chunks(chunks)
-    print(f"\nEmbedding vector length: {len(embeddings[0])}")
-    print(f"First 5 values of chunk 0 embedding: {embeddings[0][:5]}")

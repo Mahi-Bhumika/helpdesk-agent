@@ -1,3 +1,10 @@
+
+from fastapi import UploadFile, File, Form
+import tempfile
+import os
+import os as os_module  # avoid clashing with your existing `os` usage if any
+
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,12 +14,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_db
 
-from fastapi import UploadFile, File, Form
-import tempfile
-import os as os_module  # avoid clashing with your existing `os` usage if any
-
 from extract_text import extract_text
 from chunking import chunk_text, embed_chunks
+
+from groq import Groq
+
+groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
 app = FastAPI()
 
@@ -31,10 +38,6 @@ class Document(BaseModel):
     title: str
     content: str
 
-
-# --- fake in-memory "database" for now (real Postgres comes in Week 2) ---
-fake_db = {}
-next_id = 1
 
 
 @app.get("/")
@@ -182,4 +185,62 @@ async def upload_document(
     return {
         "document_id": document_id,
         "chunks_inserted": len(chunks),
+    }
+
+class ChatQuery(BaseModel):
+    tenant_id: str
+    question: str
+    top_k: int = 5
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[dict]
+
+@app.post("/chat")
+async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
+    query_embedding = embed_chunks([query.question])[0]
+
+    search_query = text("""
+        SELECT chunk_text, chunk_index, document_id, embedding <-> :query_embedding AS distance
+        FROM document_chunks
+        WHERE tenant_id = :tenant_id
+        ORDER BY embedding <-> :query_embedding
+        LIMIT :top_k
+    """)
+
+    result = await db.execute(search_query, {
+        "query_embedding": str(query_embedding),
+        "tenant_id": query.tenant_id,
+        "top_k": query.top_k,
+    })
+
+    rows = result.fetchall()
+    retrieved_chunks = [dict(row._mapping) for row in rows]
+
+    # Assemble context from retrieved chunks
+    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks)
+
+    system_prompt = (
+        "You are a helpful assistant answering questions based only on the provided context. "
+        "If the answer isn't in the context, say you don't have that information. "
+        "Do not make up information beyond what's given."
+    )
+
+    user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
+
+    completion = groq_client.chat.completions.create(
+    model="openai/gpt-oss-20b",
+    messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ],
+)
+    
+
+    answer = completion.choices[0].message.content
+
+    return {
+        "question": query.question,
+        "answer": answer,
+        "retrieved_chunks": retrieved_chunks,
     }

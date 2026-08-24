@@ -4,6 +4,8 @@ import tempfile
 import os
 import os as os_module  # avoid clashing with your existing `os` usage if any
 
+import time
+
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -144,7 +146,9 @@ async def create_tenant(tenant: TenantCreate, db: AsyncSession = Depends(get_db)
 
 
 @app.post("/kb/upload")
+
 async def upload_document(
+    
     document_id: str = Form(...),
     tenant_id: str = Form(...),
     file: UploadFile = File(...),
@@ -152,6 +156,20 @@ async def upload_document(
 
     
 ):
+
+    
+    t0 = time.time()
+    extracted_text = extract_text(tmp_path)
+    print(f"extract_text took {time.time() - t0:.2f}s")
+
+    t1 = time.time()
+    chunks = chunk_text(extracted_text, chunk_size=250, overlap=40)
+    print(f"chunk_text took {time.time() - t1:.2f}s")
+
+    t2 = time.time()
+    embeddings = embed_chunks(chunks)
+    print(f"embed_chunks took {time.time() - t2:.2f}s")
+
     # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         contents = await file.read()

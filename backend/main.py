@@ -19,6 +19,10 @@ from chunking import chunk_text, embed_chunks
 
 from groq import Groq
 
+import asyncio
+
+
+
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
 app = FastAPI()
@@ -144,7 +148,9 @@ async def upload_document(
     document_id: str = Form(...),
     tenant_id: str = Form(...),
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db)
+
+    
 ):
     # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -154,9 +160,11 @@ async def upload_document(
 
     try:
         # Reuse your existing pipeline functions
-        extracted_text = extract_text(tmp_path)
-        chunks = chunk_text(extracted_text, chunk_size=250, overlap=40)
-        embeddings = embed_chunks(chunks)
+
+        extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
+        embeddings = await asyncio.to_thread(embed_chunks, chunks)
+        
 
         insert_query = text("""
             INSERT INTO document_chunks (document_id, tenant_id, chunk_text, embedding, chunk_index)

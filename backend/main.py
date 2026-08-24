@@ -198,6 +198,18 @@ async def upload_document(
         "chunks_inserted": len(chunks),
     }
 
+
+
+class ChatQuery(BaseModel):
+    tenant_id: str
+    question: str
+    top_k: int = 5
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[dict]
+
 @app.post("/chat")
 async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
     query_embedding = embed_chunks([query.question])[0]

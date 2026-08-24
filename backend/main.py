@@ -163,19 +163,20 @@ async def upload_document(
             VALUES (:document_id, :tenant_id, :chunk_text, :embedding, :chunk_index)
         """)
 
-        for idx, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-            await db.execute(insert_query, {
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "chunk_text": chunk,
-                "embedding": str(emb),
-                "chunk_index": idx,
-            })
 
-        await db.execute(
-            text("UPDATE documents SET status = 'ready' WHERE document_id = :document_id"),
-            {"document_id": document_id}
-        )
+        rows = [
+    {
+        "document_id": document_id,
+        "tenant_id": tenant_id,
+        "chunk_text": chunk,
+        "embedding": str(emb),
+        "chunk_index": idx,
+    }
+    for idx, (chunk, emb) in enumerate(zip(chunks, embeddings))
+]
+        
+        await db.execute(insert_query, rows)  
+            
 
         await db.commit()
 

@@ -8,9 +8,9 @@ load_dotenv('.env.local')
 def create_document():
     url = f"{os.getenv('API_BASE_URL')}/documents"
     payload = {
-        "tenant_id" : f"{os.getenv("TENANT_ID")}",
-        "uploaded_by" : f"{os.getenv("USER_ID")}",
-        "file_url" : f"{os.getenv("PDF_PATH")}",
+        "tenant_id" : os.getenv("TENANT_ID"),
+        "uploaded_by" : os.getenv("USER_ID"),
+        "file_url" : os.getenv("PDF_PATH"),
         "format" : "pdf",
         "theme" : "doc",
     }
@@ -25,9 +25,9 @@ def create_document():
 def upload_pdf(document_id):
     #uploads the pdf to the /kb/upload function
     url = f"{os.getenv("API_BASE_URL")}/kb/upload"
-    with open(f"{os.getenv("PDF_PATH")}", "rb") as f:
-        files = {"file": (f"{os.getenv("PDF_PATH")}", f, "application/pdf")}
-        data = {"tenant_id": f"{os.getenv("TENANT_ID")}", "document_id" : document_id}
+    with open(os.getenv("PDF_PATH"), "rb") as f:
+        files = {"file": (os.getenv("PDF_PATH"), f, "application/pdf")}
+        data = {"tenant_id": os.getenv("TENANT_ID"), "document_id" : document_id}
         response = requests.post(url, files=files, data=data)
 
     print(f"Status code: {response.status_code}")
@@ -40,7 +40,7 @@ def upload_pdf(document_id):
 
 def check_chunks_in_db(document_id):
     # a connection to the supabase project
-    supabase = create_client(f"{os.getenv("SUPABASE_URL")}", f"{os.getenv("SUPABASE_KEY}")}")
+    supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
     result = (
         supabase.table("document_chunks")
         .select("chunk_id, chunk_index, embedding")

@@ -43,19 +43,22 @@ def _mean_pooling(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> n
     return summed / counts
 
 
-def embed_chunks(chunks: list[str]) -> list[list[float]]:
-    inputs = tokenizer(chunks, padding=True, truncation=True, max_length=256, return_tensors="np")
+def embed_chunks(chunks: list[str], batch_size: int = 8) -> list[list[float]]:
+    all_embeddings = []
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        inputs = tokenizer(batch, padding=True, truncation=True, max_length=256, return_tensors="np")
 
-    onnx_input_names = {i.name for i in session.get_inputs()}
-    onnx_inputs = {k: v for k, v in inputs.items() if k in onnx_input_names}
+        onnx_input_names = {inp.name for inp in session.get_inputs()}
+        onnx_inputs = {k: v for k, v in inputs.items() if k in onnx_input_names}
 
-    outputs = session.run(None, onnx_inputs)
-    token_embeddings = outputs[0]  # shape: (batch, seq_len, 384)
+        outputs = session.run(None, onnx_inputs)
+        token_embeddings = outputs[0]
 
-    embeddings = _mean_pooling(token_embeddings, inputs["attention_mask"])
+        batch_embeddings = _mean_pooling(token_embeddings, inputs["attention_mask"])
+        norms = np.linalg.norm(batch_embeddings, axis=1, keepdims=True)
+        batch_embeddings = batch_embeddings / norms
 
-    # L2 normalize, matching what sentence-transformers does by default
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    embeddings = embeddings / norms
+        all_embeddings.extend(batch_embeddings.tolist())
 
-    return embeddings.tolist()
+    return all_embeddings

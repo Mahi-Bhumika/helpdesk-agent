@@ -4,6 +4,8 @@ import tempfile
 import os
 import os as os_module  # avoid clashing with your existing `os` usage if any
 
+import time
+
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +20,10 @@ from extract_text import extract_text
 from chunking import chunk_text, embed_chunks
 
 from groq import Groq
+
+import asyncio
+
+
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
@@ -144,7 +150,7 @@ async def upload_document(
     document_id: str = Form(...),
     tenant_id: str = Form(...),
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db)
 ):
     # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -153,30 +159,35 @@ async def upload_document(
         tmp_path = tmp.name
 
     try:
-        # Reuse your existing pipeline functions
-        extracted_text = extract_text(tmp_path)
-        chunks = chunk_text(extracted_text, chunk_size=250, overlap=40)
-        embeddings = embed_chunks(chunks)
+        t0 = time.time()
+        extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        print(f"extract_text took {time.time() - t0:.2f}s")
+
+        t1 = time.time()
+        chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
+        print(f"chunk_text took {time.time() - t1:.2f}s")
+
+        t2 = time.time()
+        embeddings = await asyncio.to_thread(embed_chunks, chunks)
+        print(f"embed_chunks took {time.time() - t2:.2f}s")
 
         insert_query = text("""
             INSERT INTO document_chunks (document_id, tenant_id, chunk_text, embedding, chunk_index)
             VALUES (:document_id, :tenant_id, :chunk_text, :embedding, :chunk_index)
         """)
 
-        for idx, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-            await db.execute(insert_query, {
+        rows = [
+            {
                 "document_id": document_id,
                 "tenant_id": tenant_id,
                 "chunk_text": chunk,
                 "embedding": str(emb),
                 "chunk_index": idx,
-            })
+            }
+            for idx, (chunk, emb) in enumerate(zip(chunks, embeddings))
+        ]
 
-        await db.execute(
-            text("UPDATE documents SET status = 'ready' WHERE document_id = :document_id"),
-            {"document_id": document_id}
-        )
-
+        await db.execute(insert_query, rows)
         await db.commit()
 
     finally:
@@ -187,10 +198,13 @@ async def upload_document(
         "chunks_inserted": len(chunks),
     }
 
+
+
 class ChatQuery(BaseModel):
     tenant_id: str
     question: str
     top_k: int = 5
+
 
 class ChatResponse(BaseModel):
     answer: str

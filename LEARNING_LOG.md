@@ -6,7 +6,7 @@ Went from "install Node" on Day 1 to a live, deployed, end-to-end working app by
 What got built this week
 Next.js app scaffolded (TypeScript, Tailwind, App Router), deployed live on Vercel
 Repo structured as a monorepo (frontend/ + backend/), fully synced with partner's FastAPI work
-ER diagram locked for all 6 core tables: users, tenants, documents, document_chunks, chat_sessions, messages
+ER diagram locked for all 8 core tables: users, tenants, documents, document_chunks, chat_sessions, messages, end_users, message_sources.
 A real working feature: a form that POSTs to a live FastAPI /tenants endpoint, which writes to a real Supabase Postgres table — confirmed both via the API response and by checking the row directly in Supabase's table editor
 GitHub Issues opened for all of Phase 2 (Week 2 — chunking, embeddings, RAG loop), split by owner
 First real experience with gh CLI for repo management from the terminal
@@ -175,3 +175,204 @@ Foundations are solid: live backend, live database, schema locked and implemente
 - Deployment is real and stable — not just a local demo
 - Not yet built: chat session logging into `chat_sessions`/`messages` (schema exists from Week 1, not wired into `/chat` yet), any frontend/dashboard integration, auth or rate limiting on `/chat`, and genuine multi-tenant testing with more than one real tenant's data
 - Next up per the roadmap: multi-tenant UI wiring, chat session logging, and RLS policy writing (deferred from Day 10)
+
+# Helpdesk Agent — Week 2 Learning Log - Bhumika
+
+ # Week 2, Day 8, 9 (Tuesday) — Learning Log
+
+## TL;DR
+Went from zero Python environment on this machine to a working local embedding pipeline — `all-MiniLM-L6-v2` loaded, tested, and producing 384-dim vectors. Also reviewed a full extract → chunk → embed script (partner's work) that solved the token-exact chunking problem properly, using the model's own tokenizer instead of guessing at token counts.
+
+## What got built
+- Python venv set up in `backend/` from scratch (no Python previously installed on this machine)
+- `sentence-transformers` installed and working; `all-MiniLM-L6-v2` downloaded and cached locally
+- `embed.py`: a `get_embedding(text)` function, model loaded once at import time, tested on 3 sample sentences
+- Reviewed partner's combined pipeline script: `extract_text()` (pdfplumber), `chunk_text()` (token-exact chunking via the model's own tokenizer, 250 tokens / 40 overlap), `embed_chunks()` (batch embedding)
+- Locked chunking config: **250 tokens / 40 overlap** — deliberately below MiniLM's 256-token limit after catching that the original 400/50 default would've been silently truncated
+
+## Concepts learned
+- **Chunking, the "why":** exists to (1) fit the embedding model's context window and (2) keep chunks self-contained enough to be useful on retrieval — the "makes sense to a human alone = makes sense to the model" rule of thumb
+- **Semantic search:** matches by meaning (vector distance) instead of literal keyword overlap
+- **Lost-in-the-middle problem:** LLMs under-weight information buried in the middle of long context — argues for tuning `top_k` down to an optimal amount, not maxing it out
+- **MiniLM's real limit is 256 tokens, not 512** — anything beyond that gets silently truncated, no error. This is why 400/50 (the generic default) was wrong for this specific model, and why 250/40 was the actual fix
+- **Token-exact chunking:** using `tokenizer.encode()` / `tokenizer.decode()` directly (not character or word counts) guarantees chunks never exceed the model's real token limit
+- **Batch embedding:** `model.encode(list_of_chunks)` in one call is faster than looping `model.encode(single_chunk)` per chunk — matters once you're embedding a real document's worth of chunks, not 2–3 test sentences
+- **Model loading is expensive, do it once:** loading `SentenceTransformer(...)` at module/import level (not inside a function) avoids reloading the model on every single call
+- **`__name__ == "__main__"`:** lets a file run test code when executed directly (`python embed.py`) without that code firing when the file is later imported elsewhere (`from embed import get_embedding`)
+- **Type hints (`text: str`):** documentation for humans/tools, not runtime enforcement — Python won't stop you from passing the wrong type
+- **Tokenizers aren't built by hand:** they come bundled with the pretrained model as a matched pair (`model.tokenizer`) — only training a model from scratch would require building one
+- **Vector length as a sanity check:** every MiniLM embedding is 384 numbers regardless of input length; checking for consistent length + no `nan`/all-zero values confirms the pipeline is working, but says nothing about embedding *quality* — that only shows up later during real retrieval testing
+- **Git stash:** temporarily shelves uncommitted changes so the working directory is clean (e.g. before a pull/branch switch), recoverable later with `git stash pop`
+
+## The debugging saga
+Another layered one, same pattern as Week 1's CORS saga — the visible error wasn't the real problem more than once:
+1. **Duplicate venv** — VS Code auto-created its own `.venv` on top of the manually created one, without it being obvious two existed. Fixed by checking `pip list` in each and deleting the empty one.
+2. **Pylance import errors (fastapi, pydantic, sqlalchemy, dotenv)** — looked like missing packages, was actually the interpreter pointing at the *right* venv, but with nothing installed in it yet.
+3. **`pip install -r requirements.txt` → "No such file or directory"** — file existed, but the terminal was sitting in the repo root, not `backend/`, where the file actually lives. Path problem, not a missing-file problem.
+4. **`TypeError: encode() missing 1 required positional argument`** — `model.encode()` was called with empty parentheses; the `text` argument silently got dropped when writing/copying the function.
+
+**Lesson worth keeping:** most of today's errors *looked* like "this package/file doesn't exist," but were actually "you're pointed at the wrong place" — wrong venv, wrong directory, wrong argument. Checking *where* before assuming *what's missing* saved time once the pattern was recognized.
+
+## What's still open
+- Run the combined script end-to-end and actually read the real output (chunk count, first/last chunk text, embedding values)
+- Confirm no `tokenizer.decode()` artifacts (odd spacing around punctuation) in the printed chunks
+- Decide with partner which script becomes the canonical version feeding into Wednesday's pgvector schema work
+
+## Week 2, Day 10 (Wednesday) — Learning Log
+
+**TL;DR**
+
+Verified the `document_chunks` table (partner's Day 10 work) end-to-end from the SQL editor — extension enabled, column typed correctly, dimension already locked to 384 — then successfully inserted a realistic ~250-word dummy chunk with a random 384-dim vector. Also picked back up an old Vim/git-pull snag from Day 1 and this time understood *why* the fix works, not just that it does.
+
+**What got built**
+
+- Verified `pgvector` extension is enabled via `pg_extension` system catalog query
+- Verified `embedding` column's type and dimension via `information_schema.columns` and `pg_attribute.atttypmod` — confirmed already `vector(384)`, no `ALTER TABLE` needed
+- Inserted one realistic dummy chunk (~250 words, password-reset-flow text) with `chunk_index = 0` and a randomly generated 384-length vector, using `RETURNING *` to confirm the row immediately
+- Fixed a bad manual insert attempt (fake string IDs, missing column list) by switching to an explicit column list and letting Postgres auto-generate `chunk_id`
+
+**Concepts learned**
+
+- `character_maximum_length` in `information_schema.columns` only applies to character-based types (`varchar`/`char`) — it's expected to be blank for a `vector` column; it doesn't mean anything is wrong
+- `atttypmod` (from `pg_attribute`) is the generic system-catalog field for type-specific metadata — for `vector`, it stores the dimension directly (no offset), unlike `varchar`'s `+4` header quirk. Corrected an earlier assumption about a `+4` offset applying universally — it doesn't
+- **UUID format**: 32 hex digits grouped 8-4-4-4-12 (e.g. `a1b2c3d4-e5f6-4a3b-8c2d-9f0e1a2b3c4d`). A string like `'id1223'` isn't a valid UUID and Postgres rejects it outright when the column is typed `uuid`
+- `gen_random_uuid()` isn't automatic just because a column is typed `uuid` — it only fires if the original `CREATE TABLE` (or Supabase's Table Editor UI, which adds it by default when using the visual tool) explicitly set it as the column's `DEFAULT`. Checked via `information_schema.columns.column_default` rather than assuming
+- **Always specify an explicit column list in `INSERT`** — relying on positional order (no column list) means Postgres expects a value for *every* column in table order, and a mismatch throws `INSERT has more target columns than expressions`
+- `RETURNING *` — appended to `INSERT`/`UPDATE`/`DELETE`, returns the affected row(s) immediately in the same query, avoiding a separate follow-up `SELECT`
+- Revisited `git pull` → Vim merge-message prompt: `:wq` saves and completes the merge with the default message; `:q!` force-quits without saving (aborts the merge commit); plain `:q` often refuses to exit because Vim sees the pre-filled message as "unsaved"
+- `git reset --hard origin/main` vs `git checkout origin/main -- <file>` vs `git stash`: three different scopes for "override local with remote" — full wipe, single-file overwrite, or temporary shelving — not interchangeable, matched to how much local work you actually want to keep
+
+**The debugging saga**
+
+- Attempted a manual `INSERT` with fake string values (`'id1223'`, etc.) and no column list — hit two stacked failures at once: wrong column count (6 values for 7 columns) and invalid UUID format on three columns simultaneously. Fixed by naming only the columns actually being set (`chunk_text`, `chunk_index`, `embedding`) and letting Postgres/defaults handle the rest
+- Vim's merge-message prompt resurfaced (same as Day 1) — this time traced *why* `:wq` is the right call instead of just pattern-matching to "type this and it works"
+
+**What confused you (the honest section)**
+
+- Initially unsure whether `atttypmod` showing `384` meant the dimension was already correct or needed adjusting — turned out it was already right, no action needed, which felt anticlimactic after expecting to run an `ALTER TABLE`
+- Assumed a missing `character_maximum_length` meant something was misconfigured — it was just the wrong metadata field to check for a `vector` type in the first place
+- Wasn't sure whether Supabase "auto-generates" UUIDs as a platform-level guarantee — it's actually conditional on how the table was created (raw SQL `DEFAULT` clause vs. the Table Editor UI's convenience default), not a blanket rule
+
+# Week 2, Day 11 — Findings (Full)
+
+**Status: 🟡 OPEN — not resolved today, carries into next session**
+
+## TL;DR
+- Started as "write a test script for /kb/upload"
+- Turned into a multi-layer production debugging chain
+- Found and fixed **two real bugs** — insert loop + blocking event loop
+- 502 **survived both fixes**
+- Currently investigating a third hypothesis (possible OOM/memory kill)
+
+---
+
+## What got built
+- `test_kb_upload.py` — creates a document row (`POST /documents`), uploads a file (`POST /kb/upload`), independently queries Supabase to verify chunk count + check for null embeddings
+- Confirmed the real ingestion flow is **two separate calls**:
+  - `POST /documents` → creates the row, returns `document_id`
+  - `POST /kb/upload` → takes `document_id` + `tenant_id` + file, does the actual parse → chunk → embed → insert
+
+### Bugs found (from reading actual `main.py` source)
+- **Bug #1 — sequential insert loop**
+  - One `await db.execute()` per chunk, in a `for` loop
+  - 60+ chunks = 60+ sequential DB round-trips
+- **Bug #2 — blocking the event loop**
+  - `extract_text()`, `chunk_text()`, `embed_chunks()` are synchronous, CPU-heavy
+  - Called directly (no `await`) inside an `async def` route
+  - Freezes the **whole server**, not just that one request
+
+### Fixes applied
+- **Bug #1 fix:** build the full `rows` list first → one `db.execute()` call instead of looping
+- **Bug #2 fix:** wrapped the three heavy calls in `asyncio.to_thread()` to run them in a background thread
+
+### Result
+- Still 502 — on both the Render `/docs` UI and the test script
+- Rules out client-side causes a second time
+- **Currently investigating:** possible OOM (out-of-memory) kill — `embed_chunks()` processes the whole chunk list in one batched call, holding it all in memory at once for bigger documents
+
+---
+
+## Concepts learned
+- `async def` doesn't make code inside it non-blocking by default
+  - A synchronous, CPU-heavy call inside an async route still freezes the event loop
+  - Blocks *every* request the server would otherwise handle — including Render's own health checks
+- `asyncio.to_thread(fn, *args)` runs an existing sync function in a background thread
+  - The function itself stays untouched (`def`, not `async def`)
+  - Only the *call site* changes to `await asyncio.to_thread(...)`
+- `await` only works inside `async def` functions
+  - Misplacing it → `"await allowed only within async function"`
+- A real, confirmed fix doesn't guarantee the symptom disappears
+  - More than one thing can be wrong at once
+  - Ruling one cause out is still progress, even if the error persists
+- Passing a list of param dicts to `db.execute()` collapses the *Python-level* loop
+  - Doesn't strictly guarantee the driver sends it as one true network round-trip
+  - "Fewer awaited calls" ≠ "fewer round-trips," necessarily
+- OOM kills are a distinct failure mode from timeouts
+  - A process killed for using too much RAM can also surface as a 502
+  - Often nothing useful in normal logs — the process dies mid-request, no exception thrown
+- Render's **Metrics** tab ≠ **Logs** tab
+  - Logs = what the code said
+  - Metrics = what the server was actually doing (CPU/RAM over time)
+  - OOM kills often only show up in Metrics
+
+---
+
+## The debugging saga
+1. Confirmed the 502 wasn't script-side — reproduced two ways (Render `/docs` UI + test script), same failure both ways → had to be server-side
+2. Got the actual `main.py` source → found **Bug #1** (sequential insert loop) by reading code, not guessing further from behavior
+3. Rewrote insert as a single batched call → retested → **502 persisted**
+4. Re-read the code more carefully → found **Bug #2** (blocking event loop)
+5. Hit `"await allowed only within async function"` while wiring in the fix
+   - Traced to `await` being placed outside proper `async def` context
+   - Fix belongs only inside `upload_document()`, not inside the sync helper functions
+6. Applied corrected `asyncio.to_thread()` wrapping → retested → **still 502**
+7. Stopped guessing blind a third time → switched to gathering actual evidence:
+   - Checking Render's Metrics tab for a memory spike
+   - Adding chunk-count logging to see how big `CPP_OOP_Notes.pdf` actually is vs. earlier smaller test docs
+
+---
+
+## What confused you (honest section)
+- Assumed fixing one confirmed bug would resolve the symptom
+  - Learned: a persistent symptom after a real fix doesn't mean the fix was wrong — could mean a second/third contributing cause
+- Placed `await asyncio.to_thread(...)` outside a proper `async def` function
+  - Triggered the "await allowed only within async function" error
+  - Fix only belongs inside the route handler itself, not the helper functions it wraps
+- Hadn't considered memory (OOM) as a failure category distinct from timeout
+  - Both can look identical: 502 + quiet logs
+  - Needed to rule out timeout-shaped causes first before memory became the next reasonable hypothesis
+
+# Day 13 + 14 — Learning Log 
+
+## What got built
+- `/chat` endpoint in `main.py` — full RAG loop: query → embed → retrieve → generate → respond
+- `ChatRequest` (tenant_id, query, top_k) and `ChatResponse` (answer, sources) Pydantic models
+- Temporary stub for `search_similar_chunks()` to unblock work before partner's real version was ready
+- Swapped stub → partner's real `search_similar_chunks()` + `generate_answer()` once done
+- Reconciled two embedding functions: your `get_embedding()` (sentence-transformers) vs her `embed_chunks()` (ONNX)
+
+## Errors hit
+- Assumed Day 11/12 needed something "running" to start Day 13 — false; data in Supabase is permanent, no live server needed
+- Leftover duplicate imports of `retrieval`/`generation` directly in `main.py` from an earlier pass — cleaned up, logic consolidated in one place
+- Called `get_embedding()` but only `embed_chunks()` (partner's function) existed — name/signature mismatch, caught before running
+- Silent bug: `embed_chunks(request.query)` passed a raw string instead of `list[str]` — wouldn't crash, would silently produce wrong embeddings — fixed via `embed_chunks([request.query])[0]`
+
+## Concepts learned
+- Stubbing: match name + signature + return shape → build/test independently → swap in real version later, zero other changes
+- Routers (`APIRouter`) exist to stop two people editing the same `main.py` — not a FastAPI requirement, just a merge-conflict avoidance convention
+- Retrieval ≠ generation: pgvector search is pure vector math (no LLM involved); the "NLP" already happened earlier at the embedding step
+- Real-world NLP work (for ~everyone except foundation-model labs) = loading a pretrained model + building the pipeline around it, not training from scratch
+- Batch vs. single-item functions: wrap single inputs in a list, unwrap the single result — same function, different call pattern
+- Numerically compatible ≠ identical code: sentence-transformers `.encode()` and hand-rolled ONNX + mean-pooling + L2-normalize can produce the same math on different runtimes
+
+## What confused you
+- Thought router split was mandatory — it's optional, purely a collaboration convention
+- Expected NLP to be far more manual/effort-heavy than it turned out to be — most of the hard part is already baked into the pretrained model
+- Unsure if pgvector search itself "counts" as NLP — it doesn't; it's math over vectors the model already produced
+
+## Open cross-check items (for her files)
+- `embed.py`: same model weights as Day 9's chunks? same 384-dim output? truncation limit?
+- `retrieval.py`: exact param names/order, async or not, exact returned dict keys, empty-result behavior
+- `generation.py`: exact signature, expects raw chunks or pre-formatted string, which LLM API, async or not, empty-context behavior
+- Shared DB connection setup across files, hardcoded values that need to move to env vars
+- Has the full chain been tested end-to-end by her too, or only today in `/docs`?

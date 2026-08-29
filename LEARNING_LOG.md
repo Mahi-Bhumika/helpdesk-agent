@@ -376,3 +376,78 @@ Verified the `document_chunks` table (partner's Day 10 work) end-to-end from the
 - `generation.py`: exact signature, expects raw chunks or pre-formatted string, which LLM API, async or not, empty-context behavior
 - Shared DB connection setup across files, hardcoded values that need to move to env vars
 - Has the full chain been tested end-to-end by her too, or only today in `/docs`?
+
+
+
+# Helpdesk Agent — Week 3 Learning Log (Mahi)
+
+---
+
+## Summary
+
+Went from an empty `frontend/` folder to a fully working Next.js dashboard — real Supabase auth (signup, email confirmation, login, logout), a protected route system, a working document upload pipeline hitting a live FastAPI backend, a tenant-scoped analytics view, and an editable bot settings page — all reading/writing a production Postgres database through Row-Level Security. Also uncovered and fixed a real backend bug (new signups weren't being linked to their tenant at all) that would have silently broken every tenant-scoped feature built on top of it.
+
+---
+
+## What got built this week
+
+- Next.js dashboard scaffolded (TypeScript, Tailwind, App Router), `frontend/` folder alongside `backend/` in the shared repo
+- Supabase client (`lib/supabase.ts`) and an app-wide `AuthProvider`/`useAuth` context (`lib/auth-context.tsx`) — session state and the logged-in user's `tenant_id` available on every page
+- Signup page: collects tenant details (company name, type of business, subscription plan, bot name, greeting message, theme color), creates a Supabase auth account, links it to a new tenant, shows a "check your inbox" message instead of assuming an instant session
+- Login page: real `signInWithPassword` call, error handling, redirect into the dashboard
+- Protected `/dashboard/*` routes: redirect to `/login` if there's no session, with a loading state to avoid flashing dashboard content
+- Logout button
+- Document upload: drag-and-drop PDF upload (`react-dropzone`) → two-step backend call (`POST /documents` then `POST /kb/upload`) → live document list with filename and category, auto-refreshing after upload
+- Analytics page: tenant-scoped counts of chat sessions and messages, pulled directly from Supabase
+- Bot Settings page: edit and save bot name, greeting message, and theme color back to the tenant row
+- Embed Script page: generates a tenant-specific `<script>` snippet with a copy button (widget host URL still a placeholder pending Bhumika's deploy)
+- Five new Row-Level Security policies added (`users`, `documents`, `chat_sessions`, `messages`, `tenants` read + update) — RLS was enabled since Week 1 but had zero policies, so every tenant-scoped table was unreadable by default until this week
+
+---
+
+## Concepts learned (the real list)
+
+- **Next.js App Router structure**: nested layouts, file-based routing, the difference between `app/layout.tsx` (wraps everything) and `app/dashboard/layout.tsx` (wraps only dashboard routes) — and what actually happens when code meant for one accidentally ends up in the other (two default exports in one file = build error)
+- **Supabase Auth in practice**: `signUp`, `signInWithPassword`, `onAuthStateChange`, session persistence via `localStorage`, and the deliberately misleading response Supabase gives for a duplicate-email signup (`data.user.identities.length === 0` is the real signal, not `error`)
+- **Row-Level Security, hands-on**: "enabled + no policy" means *nobody* can read a table, not even its owner — including you, querying your own data, with valid credentials. A 406 error from `.single()` on a query that should return exactly one row is the signature of this, and it's easy to mistake for a "row doesn't exist" bug when the row is actually sitting right there in the Table Editor
+- **Environment variable structure matters exactly**: `NEXT_PUBLIC_SUPABASE_URL` must be the bare project URL — appending `/rest/v1` or any path breaks auth requests in a way that's easy to misdiagnose as a CORS or backend issue, since the resulting error ("Invalid path specified") doesn't obviously point at the env file
+- **Frontend/backend split on tenant linking**: a signup flow can create a real Supabase auth account *and* a real tenant row and still leave them completely disconnected, if nothing explicitly writes the join. This isn't visible from the frontend — it only surfaces once something tries to answer "which tenant does this logged-in user belong to?"
+- **NOT NULL constraints fail loudly, but not always where you're looking**: a backend INSERT missing required columns (`email`, `password_hash` in this case) throws a database error — but if the exception isn't surfacing anywhere visible in the frontend flow, it looks identical to "nothing happened," and the only way to actually confirm is checking Render's logs or the table directly
+- **Local vs. deployed code are not the same code**: editing and testing a backend file locally does nothing for a frontend that's hardcoded to call the *deployed* Render URL. A fix has to be pushed and redeployed before the live app sees it — an easy trap when developing backend and frontend in two different places at once
+- **Stale dev server cache**: Next.js's `.next` cache can occasionally serve old compiled code even after a file's contents visibly change on disk, surfacing as behavior that contradicts what's actually saved in the file. `rm -rf .next` + restart + hard browser refresh is the fix when console output stops matching the source
+- **Render free-tier cold starts**: a backend that's been idle can take 30–50 seconds to respond to the first request, which looks identical to "broken" from the frontend if you don't know to expect it
+- **Rate limits, plural**: Supabase enforces at least two separate limits during signup testing — a short per-attempt cooldown ("only request this after 46 seconds") and a broader email-sending cap ("email rate limit exceeded") — easy to conflate as the same issue when rapid-testing signup
+
+---
+
+## The debugging saga (worth remembering, not just logging)
+
+Several separate bugs stacked on each other this week, and untangling which was which was most of the actual work:
+
+1. **"Invalid path specified in request URL"** on signup → traced via the Network tab to a malformed request URL (`/rest/v1/auth/v1/signup` instead of `/auth/v1/signup`) → root cause was a path segment accidentally included in `NEXT_PUBLIC_SUPABASE_URL`
+2. **Login appeared to do nothing** → console showed stale `"Login attempt :"` logs from an old version of the code, even though the file on disk was already correct → root cause was a stale `.next` build cache, not a code bug at all
+3. **New tenant row created on every duplicate-email signup attempt** → Supabase returns a fake-success response for existing emails rather than an error, so the code sailed past the auth check and created an orphaned tenant every time → fixed by checking `data.user.identities.length === 0` before proceeding
+4. **Backend "fix" for linking users to tenants silently did nothing** → the INSERT was missing two `NOT NULL` columns (`email`, `password_hash`) that only existed once the real `schema.sql` was actually checked, rather than assumed
+5. **`tenantId` stuck on "Loading your account..." forever, four repeated 406 errors in console** → row genuinely existed in the `users` table, but RLS was enabled with zero read policy, so the anon-key query returned nothing without throwing a visible error — fixed with an explicit `auth.uid() = user_id` policy
+
+The throughline: **almost none of these failed loudly with an obviously-correct error message.** Each one required actually looking — Network tab, Render logs, the Table Editor directly — rather than assuming from a vague symptom ("nothing happened," "it's slow," "the page won't load") what the cause must be.
+
+---
+
+## What confused me (honest list)
+
+- Assumed early on that a `console.log` still appearing after a code change meant the edit hadn't saved — didn't initially consider that the dev server's cache could be serving old compiled output independent of the source file
+- Didn't realize Supabase deliberately obscures whether an email is already registered (returns "success" either way) — cost a few duplicate tenant rows before catching it
+- Conflated two different Supabase rate limits (per-attempt cooldown vs. email-sending cap) as the same thing at first
+- Assumed the confirmation-email redirect page failing to load meant the confirmation itself hadn't registered — they're actually unrelated; the account can be fully confirmed server-side even if the post-click redirect page errors out client-side
+- Underestimated how much of "it's not working" during this week was actually RLS silently returning nothing, rather than a bug in the query or component logic itself — this pattern repeated three separate times (`users`, `documents`, and pre-emptively for `chat_sessions`/`messages`/`tenants`) before it became the first thing to check
+
+---
+
+## Where things stand heading into Week 4
+
+- Frontend and backend are fully connected for the core owner flow: signup → email confirmation → login → upload documents → view them → see analytics → edit bot settings → generate an embed snippet
+- Five RLS policies now exist; per the Week 1 plan, full RLS policy work was scheduled for Week 4 — a meaningful chunk of it already landed early, out of necessity
+- The embed snippet is functionally complete but points at a placeholder widget URL, pending Bhumika's deployed `widget.js`
+- The joint milestone (owner's embed snippet working on a real dummy page, widget talking to the same backend as the dashboard) is the one piece still blocked on both sides being ready at the same time
+- Next up per the roadmap: Week 4 — remaining RLS policy coverage, invite flow, and closing the loop on the full end-to-end demo with Bhumika's widget

@@ -221,36 +221,56 @@ async def upload_document(
 
 class ChatQuery(BaseModel):
     tenant_id: str
+    session_id: Optional[str] = None
     question: str
     top_k: int = 5
 
 
-class ChatResponse(BaseModel):
-    answer: str
-    sources: list[dict]
+class ChatSource(BaseModel):
+    chunk_id: str
+    relevance_score: float
 
-@app.post("/chat")
+
+class ChatResponse(BaseModel):
+    session_id: str
+    answer: str
+    sources: list[ChatSource]
+
+
+@app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
+    # Step 1: create a session if this is the first message
+    session_id = query.session_id
+    if session_id is None:
+        session_result = await db.execute(
+            text("""
+                INSERT INTO chat_sessions (tenant_id)
+                VALUES (:tenant_id)
+                RETURNING session_id
+            """),
+            {"tenant_id": query.tenant_id},
+        )
+        session_id = str(session_result.fetchone().session_id)
+
+    # Step 2: embed the query and retrieve relevant chunks
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
-        SELECT chunk_text, chunk_index, document_id, embedding <-> :query_embedding AS distance
+        SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <-> :query_embedding AS distance
         FROM document_chunks
         WHERE tenant_id = :tenant_id
         ORDER BY embedding <-> :query_embedding
         LIMIT :top_k
     """)
-
     result = await db.execute(search_query, {
         "query_embedding": str(query_embedding),
         "tenant_id": query.tenant_id,
         "top_k": query.top_k,
     })
-
     rows = result.fetchall()
     retrieved_chunks = [dict(row._mapping) for row in rows]
 
-    # Assemble context from retrieved chunks
+    # Step 3: build context and call the LLM
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks)
 
     system_prompt = (
@@ -258,22 +278,60 @@ async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
         "If the answer isn't in the context, say you don't have that information. "
         "Do not make up information beyond what's given."
     )
-
     user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
 
     completion = groq_client.chat.completions.create(
-    model="openai/gpt-oss-20b",
-    messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ],
-)
-    
-
+        model="openai/gpt-oss-20b",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
     answer = completion.choices[0].message.content
 
-    return {
-        "question": query.question,
-        "answer": answer,
-        "retrieved_chunks": retrieved_chunks,
-    }
+    # Step 4: log the user's message
+    await db.execute(
+        text("""
+            INSERT INTO messages (session_id, tenant_id, sender, content)
+            VALUES (:session_id, :tenant_id, 'user', :content)
+        """),
+        {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+    )
+
+    # Step 5: log the bot's message, get its id
+    bot_message_result = await db.execute(
+        text("""
+            INSERT INTO messages (session_id, tenant_id, sender, content)
+            VALUES (:session_id, :tenant_id, 'bot', :content)
+            RETURNING message_id
+        """),
+        {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
+    )
+    bot_message_id = bot_message_result.fetchone().message_id
+
+    # Step 6: log which chunks contributed to this answer
+    sources = []
+    if retrieved_chunks:
+        source_rows = [
+            {
+                "message_id": bot_message_id,
+                "chunk_id": chunk["chunk_id"],
+                "relevance_score": 1 / (1 + chunk["distance"]),  # convert distance to a 0-1 relevance score
+            }
+            for chunk in retrieved_chunks
+        ]
+        await db.execute(
+            text("""
+                INSERT INTO message_sources (message_id, chunk_id, relevance_score)
+                VALUES (:message_id, :chunk_id, :relevance_score)
+            """),
+            source_rows,
+        )
+        sources = [
+            ChatSource(chunk_id=str(row["chunk_id"]), relevance_score=1 / (1 + row["distance"]))
+            for row in retrieved_chunks
+        ]
+
+    await db.commit()
+
+    return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)

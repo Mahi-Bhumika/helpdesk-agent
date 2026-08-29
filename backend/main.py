@@ -128,7 +128,8 @@ async def db_check(db: AsyncSession = Depends(get_db)):
 
 # --- Pydantic model matching the tenants table ---
 class TenantCreate(BaseModel):
-    owner_id: str          # ← new: the Supabase auth user's ID
+    owner_id: str
+    owner_email: str          # ← new
     company_name: str
     type_of_business: Optional[str] = None
     subscription_plan: Optional[str] = None
@@ -139,24 +140,24 @@ class TenantCreate(BaseModel):
 
 @app.post("/tenants")
 async def create_tenant(tenant: TenantCreate, db: AsyncSession = Depends(get_db)):
-    # 1. Create the tenant
     tenant_query = text("""
         INSERT INTO tenants (company_name, type_of_business, subscription_plan, bot_name, greeting_message, theme_color)
         VALUES (:company_name, :type_of_business, :subscription_plan, :bot_name, :greeting_message, :theme_color)
         RETURNING tenant_id, company_name, invite_token, created_at
     """)
-    tenant_data = tenant.model_dump(exclude={"owner_id"})
+    tenant_data = tenant.model_dump(exclude={"owner_id", "owner_email"})
     result = await db.execute(tenant_query, tenant_data)
     new_tenant = result.fetchone()
 
-    # 2. Link the signed-up user to this new tenant as owner
     user_query = text("""
-        INSERT INTO users (user_id, tenant_id, role)
-        VALUES (:user_id, :tenant_id, 'owner')
+        INSERT INTO users (user_id, tenant_id, email, password_hash, role)
+        VALUES (:user_id, :tenant_id, :email, :password_hash, 'owner')
     """)
     await db.execute(user_query, {
         "user_id": tenant.owner_id,
         "tenant_id": new_tenant.tenant_id,
+        "email": tenant.owner_email,
+        "password_hash": "MANAGED_BY_SUPABASE_AUTH",  # real auth handled by Supabase, not this column
     })
 
     await db.commit()

@@ -402,6 +402,8 @@ Went from an empty `frontend/` folder to a fully working Next.js dashboard — r
 - Bot Settings page: edit and save bot name, greeting message, and theme color back to the tenant row
 - Embed Script page: generates a tenant-specific `<script>` snippet with a copy button (widget host URL still a placeholder pending Bhumika's deploy)
 - Five new Row-Level Security policies added (`users`, `documents`, `chat_sessions`, `messages`, `tenants` read + update) — RLS was enabled since Week 1 but had zero policies, so every tenant-scoped table was unreadable by default until this week
+- Rebuilt `/chat` (backend) to actually use the schema it was designed for: creates a `chat_sessions` row on the first message (when `session_id` is null) and returns its id for the widget to reuse on follow-ups, logs both the user's question and the bot's answer into `messages`, and logs which chunks contributed to each answer into `message_sources` with a relevance score. Previously `/chat` answered questions statelessly — nothing was being saved, which is also why Analytics showed zero sessions/messages even after real testing
+- Reviewed and negotiated the `/chat` request/response contract with Bhumika (widget side) before she wired up the send button — caught a mismatch between her proposed shape and what the backend actually returned, and confirmed the field name (`question`, not `query`) explicitly so neither side built against a guess
 
 ---
 

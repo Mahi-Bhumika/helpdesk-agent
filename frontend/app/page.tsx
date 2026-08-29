@@ -14,6 +14,11 @@ export default function Home() {
         LOG IN &lt;3
       </Link>
       <Link
+      href="/signup"
+      className="rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800">
+        Sign up
+      </Link>
+      <Link
       href="/test_connection"
       className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors cursor-pointer">
       Test Backend Connection

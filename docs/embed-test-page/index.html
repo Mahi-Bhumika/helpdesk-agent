@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Totally Unrelated Company Inc.</title>
+  <style>
+    body { font-family: Georgia, serif; max-width: 700px; margin: 60px auto; color: #2b2b2b; }
+    h1 { font-size: 26px; }
+  </style>
+</head>
+<body>
+  <h1>Totally Unrelated Company Inc.</h1>
+  <p>
+    This page pretends to be a real client's website — it knows nothing
+    about the widget project's codebase, doesn't share a build system,
+    and loads the widget purely as a third-party script from a
+    different local server (different port = different origin, which
+    is what actually triggers real cross-origin/CORS behavior — opening
+    two files directly via file:// does NOT test this properly, since
+    both would share the same "null" origin).
+  </p>
+  <p>
+    Run this with two servers on two ports, see README.md next to this
+    file for the exact commands.
+  </p>
+
+  <!-- Absolute URL, different port = different origin on purpose -->
+  <script
+    src="https://helpdesk-agent-mahi-bhumika.vercel.app/widget.js"
+    data-tenant-id="675adb4b-8771-404d-ac8d-3cc69c3c756b"
+    data-api-url="https://helpdesk-agent-9eu9.onrender.com"
+    data-color="#1F8A70"
+    data-position="bottom-right"
+    data-greeting="Hey! Ask me anything about Totally Unrelated Company."
+    defer
+  ></script>
+</body>
+</html>

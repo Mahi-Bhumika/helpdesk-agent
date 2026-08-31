@@ -21,6 +21,8 @@ from chunking import chunk_text, embed_chunks
 
 from groq import Groq
 
+from rate_limit import enforce_chat_rate_limit
+
 import asyncio
 
 
@@ -240,6 +242,8 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
+    enforce_chat_rate_limit(query.tenant_id)   # ← new, first line in the function
+
     # Step 1: create a session if this is the first message
     session_id = query.session_id
     if session_id is None:

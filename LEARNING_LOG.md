@@ -453,3 +453,285 @@ The throughline: **almost none of these failed loudly with an obviously-correct 
 - The embed snippet is functionally complete but points at a placeholder widget URL, pending Bhumika's deployed `widget.js`
 - The joint milestone (owner's embed snippet working on a real dummy page, widget talking to the same backend as the dashboard) is the one piece still blocked on both sides being ready at the same time
 - Next up per the roadmap: Week 4 — remaining RLS policy coverage, invite flow, and closing the loop on the full end-to-end demo with Bhumika's widget
+
+# Week 3 — Learning Log (Bhumika)
+
+Went from an empty `widget.js` skeleton on Day 15 to a genuinely
+production-tested embeddable chat widget by Day 21 — Shadow DOM
+isolated, wired to the live Render backend, CORS-safe two different
+ways, rate-limited against direct abuse, and hosted publicly on
+Vercel + GitHub Pages, not just proven on localhost. Also chased a
+CORS bug into what turned out to be a completely unrelated local
+`.env` crash, which is worth its own section below — same shape of
+lesson as Week 1's CORS saga, wearing a different disguise.
+
+## What got built this week
+
+- **Day 15** — `widget.js` skeleton: IIFE-wrapped so nothing leaks
+  into a tenant's global scope, reads its own config
+  (`tenantId`/`apiUrl`/`color`/`position`) off its own `<script>` tag
+  via `data-*` attributes, floating bubble + toggleable panel shell
+- **Day 16** — real message list UI: bot/user message bubbles,
+  input + send footer, a first-open greeting message
+- **Day 17** — wired the send button to a real `POST /chat` call —
+  `fetch`/Promise chain, error handling, `session_id` threading
+  (flagged a real contract gap: backend's `ChatResponse` doesn't
+  return `session_id` yet, so multi-turn memory doesn't actually
+  persist server-side until that's added)
+- **Day 18** — moved the whole widget into Shadow DOM
+  (`attachShadow`) for genuine CSS isolation — verified for real,
+  not just assumed, against a deliberately hostile test page
+  (`demo-aggressive-css.html`, `!important` rules on every
+  `button`/`div`/`input`) — bubble and panel stayed completely
+  unaffected
+- **Day 19** — typing/loading indicator (bouncing dots via CSS
+  `@keyframes`), input + send button disabled while a request is in
+  flight so you can't double-fire a message
+- **Day 20** — CORS, two ways: **Option A** (global wildcard
+  `CORSMiddleware`, handed off to my teammate to unblock the
+  Sat/Sun milestone fast) and **Option B** (custom path-aware
+  middleware I actually built — `/chat` gets wildcard + no
+  credentials, dashboard routes get a strict origin allowlist +
+  credentials — verified with a real `TestClient` across four
+  scenarios, not just written and assumed correct)
+- **Day 21** — packaged `widget.js` as a genuinely standalone file,
+  proved three ways: a local 3-terminal cross-origin simulation
+  (`embed-test-site/`, three real ports acting as three real
+  origins), then actual public hosting (Vercel's `public/` folder +
+  GitHub Pages), confirmed end-to-end against the *live* Render
+  backend — real answer, real 200, real CORS headers
+- **Unplanned but shipped anyway** — rate limiting on `/chat`
+  (sliding window, per-`tenant_id`), after realizing `tenant_id`
+  being necessarily public (it's in the embed script by design)
+  means anyone could scrape it and hit `/chat` directly with a
+  script — no browser, no widget, no CORS involved at all. Tested
+  against a real FastAPI route with an actual 1.1-second real-time
+  sleep to prove the window really slides, not just claimed to
+
+## Concepts learned (the real list)
+
+- **IIFE + closures, properly understood this time** — the actual
+  mechanism behind how `sessionId`/`hasGreeted`/`isSending` "remember"
+  state across multiple button clicks with zero global variables and
+  zero framework. `mountWidget()` runs once and returns, but the
+  functions it defines keep living as event listeners, still holding
+  onto its local variables forever
+- **`textContent` vs `innerHTML` — the real reason, not just a style
+  choice.** Never let visitor-typed or bot-generated text pass
+  through `innerHTML` — that's the actual XSS boundary, not a
+  cosmetic preference
+- **Promise chains** — `.then()`/`.catch()`/`.finally()`, and that a
+  `throw` inside a `.then()` routes straight to the nearest `.catch()`
+  instead of crashing the page
+- **Shadow DOM, the full mechanism** — `attachShadow()` creates a
+  genuinely separate DOM tree that host-page CSS *rules* can't match
+  into. But rule-matching isolation and *property inheritance* are
+  two different things — `:host{all:initial}` is needed on top,
+  because inherited properties (font, color, line-height) still flow
+  in from the host page's `<body>` unless explicitly reset
+- **CSS specificity/cascade, for real this time** — the `[hidden]`
+  bug from Day 15 revisited with actual vocabulary: two rules of
+  equal specificity resolve by *source order*, not by which one
+  "feels" more specific
+- **Flexbox in practice** — `align-self` vs `align-items`,
+  `flex-shrink: 0`, `gap`, and why `align-self: flex-end` still means
+  "push right" even inside a `flex-direction: column` container
+  (cross-axis, not main-axis)
+- **CORS is a browser-JS restriction, not a security boundary** — a
+  plain script or `curl` loop ignores it completely. RLS is the
+  actual data boundary; CORS and rate limiting are cost/abuse
+  boundaries, a genuinely different job
+- **Public identifiers vs real secrets** — `tenant_id` and the API
+  base URL are *supposed* to be visible, same category as a Stripe
+  publishable key. Real secrets are the ones that touch
+  billing/DB/LLM API keys directly, and env vars don't make a
+  client-shipped value secret — they just avoid hardcoding it across
+  files
+- **Why env vars can't hide anything inside an embed script** — no
+  build step exists on a *tenant's own* website. There's no live
+  connection back to my Vercel project for a secret to travel through
+  at request time, even if I wanted one to — the value has to be
+  sitting in the pasted HTML, permanently, by construction
+- **Sliding window vs fixed window rate limiting** — fixed windows
+  have a real edge case (a burst of 2x the limit across a window
+  boundary slips through, each half technically within its own
+  window). Sliding avoids it by dropping only timestamps older than
+  the window on every check, instead of resetting a counter on a
+  clock tick
+
+## Real bugs found and fixed
+
+1. **`[hidden]` silently overridden by `.botai-panel{display:flex}`**
+   — a CSS specificity tie, broken by declaration order, invisible
+   until actually traced rather than guessed at
+2. **Local `DATABASE_URL` crash mid-CORS-debugging** — same bug
+   *class* as Week 1's Day 11 (`os.getenv()` silently returning
+   `None`), but this time it was a complete red herring: an unrelated
+   local `.env` problem on my own machine, surfacing at the exact
+   moment I was testing a teammate's CORS fix, initially looked like
+   it might be connected and wasn't
+3. **422 on the live `/chat` call** — request body shape mismatch,
+   the `session_id` contract gap flagged all the way back on Day 15
+   finally surfacing for real the moment a real backend was actually
+   hit instead of a stub
+
+## Decisions made deliberately, not by default
+
+- Shipped **Option A** (global wildcard CORS) to hit the Sat/Sun
+  milestone on time, deliberately deferring the more-correct
+  **Option B** to buffer week — then actually built Option B once
+  there was room, instead of letting "worth doing later" quietly
+  never happen
+- Chose **in-memory** rate limiting over Redis/Postgres-backed —
+  correct tradeoff for a single free-tier Render instance, explicitly
+  documented as needing to change the moment this app ever scales
+  past one instance
+- Chose **Vercel's `public/` folder** over jsDelivr for hosting
+  `widget.js` — zero new signups, uses infrastructure already
+  deployed, accepted "manually `cp` the file before pushing" as a
+  genuinely fine rough edge at this project's size rather than
+  building automation the problem doesn't need yet
+
+## The debugging saga worth remembering
+
+Testing my teammate's Option A CORS fix, the local backend crashed at
+*startup* — not a `/chat` runtime error, not CORS at all,
+`uvicorn`/`importlib` failing before the app ever came up. The
+traceback's first two screenshots only showed generic Python import
+machinery (`_gcd_import`, `import_module`) — every import-time crash
+looks identical that far up the stack. The actually useful line only
+showed up at the very bottom of the *third* screenshot:
+`sqlalchemy.exc.ArgumentError: Expected string or URL object, got
+None` — `DATABASE_URL` was `None` locally, unrelated to anything
+either of us had touched that day.
+
+**The lesson, restated because it keeps being true:** the first error
+you see is where the trace *ends up*, not necessarily where the
+actual bug *is*. Once local was untangled from that and confirmed
+irrelevant, the real CORS retest against the live Render backend
+worked cleanly — preflight succeeded, and the next real bug (422) was
+a completely different, much smaller issue: a request-shape mismatch,
+solved by reading the actual `detail` array FastAPI hands back instead
+of guessing at which field was wrong.
+
+## What confused me (the honest section)
+
+- Initially reached for "just deploy `widget.js` and test against
+  that" as a fix for a CORS/422 issue that was 100% backend-side —
+  mixed up which layer actually owned the bug, and deploying the
+  wrong layer wouldn't have told me anything
+- Thought putting `tenant_id`/`apiUrl` in Vercel env vars would hide
+  them from a public embed script — hadn't separated "avoids
+  hardcoding across files" from "makes something actually secret,"
+  and hadn't clocked that env vars only get read at *build* time by
+  *my own* project, not by an unrelated third-party site with zero
+  connection back to it
+- Got a CORS-shaped error that turned out to be an entirely
+  unconnected local `.env` problem — the exact same "the visible
+  error isn't always the real one" trap from Week 1, showing up again
+  in a new shape
+# Debug Log — Aug 30, 2026
+
+Session: Vercel deploy + local dev issues after Mahi's README/dashboard-auth push. Four separate, unrelated bugs, fixed one at a time.
+
+---
+
+## 1. Vercel build — TS2306: File is not a module
+
+**Where:** Vercel production build
+**Error:**
+```
+.next/types/validator.ts(69,39): error TS2306: File '/vercel/path0/frontend/app/dashboard/sessions/page.tsx' is not a module.
+```
+
+**Cause:** `app/dashboard/sessions/page.tsx` existed but had no `import`/`export` statements (empty or stub file). Next.js's auto-generated route type-checker requires every `page.tsx` to have a valid `export default`, so TypeScript couldn't treat the file as a module at all.
+
+**Likely origin:** File was created locally, never committed/pushed until it hitched a ride on the README commit (`git add -A` / `git commit -a` scoops up untracked files).
+
+**Fix:** Deleted the stub file. (Longer-term: any placeholder route file needs at least a minimal `export default function Page() { return <div/> }` before committing.)
+
+**Follow-up worth doing:** `git log --follow -- frontend/app/dashboard/sessions/page.tsx` to confirm exactly when it was first pushed, and check Vercel's Deployments tab for whether yesterday's build was silently red.
+
+---
+
+## 2. Vercel build — `supabaseUrl is required`
+
+**Where:** Vercel production build, during static prerender of `_not-found` page
+**Error:**
+```
+Error: supabaseUrl is required.
+  at module evaluation (lib/supabase.ts:4:14)
+  at module evaluation (lib/auth-context.tsx:4:1)
+```
+
+**Cause:** `lib/supabase.ts` calls `createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, ...)` at module top-level. `auth-context.tsx` wraps the app (likely via root layout), so this module loads during Next.js's build-time prerender of every page — including the auto-generated 404 page. `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` were never set in **Vercel's** Environment Variables (existing only in local `.env.local`, which Vercel never reads).
+
+**Fix:** Add both vars in Vercel → Project Settings → Environment Variables, scoped to Production (and Preview if needed), then redeploy (env var changes don't auto-trigger a rebuild of existing deployments).
+
+---
+
+## 3. npm warning — `allow-scripts` (esbuild, unrs-resolver)
+
+**Where:** `npm install` output, both local and Vercel build logs
+**Warning:**
+```
+npm warn allow-scripts 2 packages have install scripts not yet covered by allowScripts:
+npm warn allow-scripts   esbuild@0.28.2 (postinstall: node install.js)
+npm warn allow-scripts   unrs-resolver@1.12.2 (postinstall: node postinstall.js)
+```
+
+**Verdict: not a bug.** This is a newer npm supply-chain-security feature — it skips running postinstall scripts for packages not yet on an approved list, but the install itself completes normally. Packages were still installed into `node_modules`; only their postinstall scripts were skipped. `npm approve-scripts --allow-scripts-pending` returning "none" just confirms there's nothing left pending — not a failure.
+
+**Action taken:** None needed. Confirmed via `ls node_modules/esbuild` / `ls node_modules/unrs-resolver` that both were present.
+
+---
+
+## 4. Local dev — Module not found: `@supabase/supabase-js`
+
+**Where:** `localhost:3000`, Mahi's machine
+**Error:**
+```
+Module not found: Can't resolve '@supabase/supabase-js'
+./lib/supabase.ts (2:1)
+```
+
+**Cause:** `lib/supabase.ts` imports `@supabase/supabase-js`, but the package was never installed on her machine — `npm install @supabase/supabase-js` was never run (code was written/copied without the install step).
+
+**Fix:** `npm install @supabase/supabase-js` in `frontend/`, restart dev server. (Note: `npm install <pkg>` auto-adds it to `package.json` — no manual edit needed.)
+
+---
+
+## 5. Local install — `npm error ECONNRESET`
+
+**Where:** Same machine, while running the fix for #4
+**Error:**
+```
+npm error code ECONNRESET
+npm error network Invalid response body while trying to fetch https://registry.npmjs.org/@supabase%2fsupabase-js
+```
+
+**Cause:** Network-level connection drop to npm's registry — not a code or config issue. Common with unstable wifi, VPNs, campus/public networks, or antivirus/firewall interference.
+
+**Fix:** Retried the same install command — resolved on retry (registry blips are common; not worth deep investigation unless it fails repeatedly).
+
+---
+
+## Recurring pattern across all 5
+
+Every single one of these was a **separate, unrelated** cause surfaced one at a time by fixing the previous error and re-running — not one root problem. Matches the pattern already logged in Week 1/2: the first visible error is rarely the last one, and each fix just uncovers the next layer. Worth remembering for future deploys: don't assume "fixed" until a build actually goes green end-to-end.
+
+
+## Heading into Week 4
+
+Widget is functionally complete and genuinely production-tested, not
+just locally simulated: Shadow DOM isolated, real backend wired,
+CORS handled two ways, rate-limited against direct-script abuse,
+hosted publicly on both Vercel and GitHub Pages. Open items carried
+forward, not forgotten: confirm the backend is actually returning
+`session_id` for real multi-turn threading; decide with my teammate
+whether Option A or Option B CORS is what actually ships; confirm
+`rate_limit.py` got merged in. Next up per the plan: RLS policies +
+the attack script (Week 4's real focus), starting with my own Monday
+task — standing up a second test tenant with a different sample PDF,
+so there's something real for the attack script to try (and fail) to
+reach.

@@ -43,7 +43,7 @@ def _mean_pooling(token_embeddings: np.ndarray, attention_mask: np.ndarray) -> n
     return summed / counts
 
 
-def embed_chunks(chunks: list[str], batch_size: int = 4) -> list[list[float]]:
+def embed_chunks(chunks: list[str], batch_size: int = 8) -> list[list[float]]:
     all_embeddings = []
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]

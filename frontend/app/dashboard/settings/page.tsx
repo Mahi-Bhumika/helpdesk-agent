@@ -51,6 +51,39 @@ export default function SettingsPage() {
         if (!error) setSaved(true);
     };
 
+        // State, alongside your existing botName/greeting/theme state
+    const [websiteDomain, setWebsiteDomain] = useState("");
+
+    // Add to your existing useEffect that loads current settings, or a new one:
+    useEffect(() => {
+    const fetchTenant = async () => {
+        const { data } = await supabase
+        .from("tenants")
+        .select("website_domain")
+        .single();
+        if (data?.website_domain) setWebsiteDomain(data.website_domain);
+    };
+    fetchTenant();
+    }, []);
+
+    // Save handler
+    const handleSaveWebsiteDomain = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/tenants/website-domain`, {
+        method: "PUT",
+        headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({ website_domain: websiteDomain }),
+    });
+  if (!res.ok) {
+    console.error("Failed to save website domain");
+    return;
+  }
+  // show a success toast/message, matching whatever pattern your other settings saves use
+};
+
     if (!tenantId || loading) {
         return <div>Loading settings...</div>;
     }
@@ -93,6 +126,17 @@ export default function SettingsPage() {
                     {saving ? "Saving..." : "Save changes"}
                 </button>
                 {saved && <p className="text-sm text-green-500">Saved ✓</p>}
+                <label>Your Website Domain</label>
+                <input
+                    type="text"
+                    value={websiteDomain}
+                    onChange={(e) => setWebsiteDomain(e.target.value)}
+                    placeholder="yourcompany.com"
+                />
+                <p style={{ fontSize: "0.85em", color: "#888" }}>
+                    The domain where your chat widget is embedded. Required for the widget to work.
+                </p>
+                <button onClick={handleSaveWebsiteDomain}>Save</button>
             </form>
         </div>
     );

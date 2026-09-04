@@ -7,7 +7,7 @@ import os as os_module  # avoid clashing with your existing `os` usage if any
 import time
 
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -24,6 +24,8 @@ from groq import Groq
 from rate_limit import enforce_chat_rate_limit
 
 import asyncio
+
+from auth import get_current_user, decode_jwt
 
 
 
@@ -55,13 +57,20 @@ def read_root():
 
 
 @app.get("/documents/{document_id}")
-async def get_document(document_id: str, db: AsyncSession = Depends(get_db)):
+async def get_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     query = text("SELECT * FROM documents WHERE document_id = :document_id")
     result = await db.execute(query, {"document_id": document_id})
     row = result.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    return dict(row._mapping)
+    doc = dict(row._mapping)
+    if str(doc["tenant_id"]) != current_user["tenant_id"]:  # ← wrap in str()
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    return doc
 
 
 class DocumentUpdate(BaseModel):
@@ -72,13 +81,21 @@ class DocumentUpdate(BaseModel):
 
 
 @app.put("/documents/{document_id}")
-async def update_document(document_id: str, doc: DocumentUpdate, db: AsyncSession = Depends(get_db)):
+async def update_document(
+    document_id: str,
+    doc: DocumentUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     existing = await db.execute(
-        text("SELECT document_id FROM documents WHERE document_id = :document_id"),
+        text("SELECT document_id, tenant_id FROM documents WHERE document_id = :document_id"),
         {"document_id": document_id}
     )
-    if existing.fetchone() is None:
+    row = existing.fetchone()
+    if row is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    if str(row.tenant_id) != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
 
     query = text("""
         UPDATE documents
@@ -104,7 +121,14 @@ class DocumentCreate(BaseModel):
 
 
 @app.post("/documents")
-async def create_document(doc: DocumentCreate, db: AsyncSession = Depends(get_db)):
+async def create_document(
+    doc: DocumentCreate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if doc.tenant_id != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+
     query = text("""
         INSERT INTO documents (tenant_id, uploaded_by, file_url, format, theme)
         VALUES (:tenant_id, :uploaded_by, :file_url, :format, :theme)
@@ -112,9 +136,7 @@ async def create_document(doc: DocumentCreate, db: AsyncSession = Depends(get_db
     """)
     result = await db.execute(query, doc.model_dump())
     await db.commit()
-    new_row = result.fetchone()
-    return dict(new_row._mapping)
-
+    return dict(result.fetchone()._mapping)
 
 
 
@@ -142,7 +164,14 @@ class TenantCreate(BaseModel):
 
 
 @app.post("/tenants")
-async def create_tenant(tenant: TenantCreate, db: AsyncSession = Depends(get_db)):
+async def create_tenant(
+    tenant: TenantCreate,
+    verified_user_id: str = Depends(decode_jwt),
+    db: AsyncSession = Depends(get_db),
+):
+    if tenant.owner_id != verified_user_id:
+        raise HTTPException(status_code=403, detail="owner_id does not match authenticated user")
+
     tenant_query = text("""
         INSERT INTO tenants (company_name, type_of_business, subscription_plan, bot_name, greeting_message, theme_color)
         VALUES (:company_name, :type_of_business, :subscription_plan, :bot_name, :greeting_message, :theme_color)
@@ -160,9 +189,8 @@ async def create_tenant(tenant: TenantCreate, db: AsyncSession = Depends(get_db)
         "user_id": tenant.owner_id,
         "tenant_id": new_tenant.tenant_id,
         "email": tenant.owner_email,
-        "password_hash": "MANAGED_BY_SUPABASE_AUTH",  # real auth handled by Supabase, not this column
+        "password_hash": "MANAGED_BY_SUPABASE_AUTH",
     })
-
     await db.commit()
     return dict(new_tenant._mapping)
 
@@ -172,9 +200,13 @@ async def upload_document(
     document_id: str = Form(...),
     tenant_id: str = Form(...),
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db)
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    # Save the uploaded file to a temp path so pdfplumber can read it
+    if tenant_id != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+
+    # ...rest of the function unchanged from here down    # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         contents = await file.read()
         tmp.write(contents)
@@ -241,9 +273,20 @@ class ChatResponse(BaseModel):
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
-    enforce_chat_rate_limit(query.tenant_id)   # ← new, first line in the function
+async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
+    enforce_chat_rate_limit(query.tenant_id)
 
+    tenant_row = await db.execute(
+        text("SELECT website_domain FROM tenants WHERE tenant_id = :tid"),
+        {"tid": query.tenant_id},
+    )
+    tenant = tenant_row.fetchone()
+    if not tenant or not tenant.website_domain:
+        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
+    if not origin or tenant.website_domain not in origin:
+        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
+
+    # ...rest unchanged
     # Step 1: create a session if this is the first message
     session_id = query.session_id
     if session_id is None:
@@ -340,3 +383,31 @@ async def chat(query: ChatQuery, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
+
+class WebsiteDomainUpdate(BaseModel):
+    website_domain: str
+
+
+@app.put("/tenants/website-domain")
+async def update_website_domain(
+    payload: WebsiteDomainUpdate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        text("""
+            UPDATE tenants
+            SET website_domain = :website_domain
+            WHERE tenant_id = :tenant_id
+            RETURNING tenant_id, website_domain
+        """),
+        {
+            "website_domain": payload.website_domain,
+            "tenant_id": current_user["tenant_id"],  # server-derived, not client-supplied
+        },
+    )
+    await db.commit()
+    row = result.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return dict(row._mapping)

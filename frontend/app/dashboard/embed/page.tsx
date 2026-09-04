@@ -9,7 +9,7 @@ export default function EmbedPage() {
         return <div>Loading...</div>;
     }
 
-    const snippet = `<script src="https://YOUR-WIDGET-HOST/widget.js" data-tenant-id="${tenantId}"></script>`;
+    const snippet = `<script src="https://helpdesk-agent-mahi-bhumika.vercel.app/widget.js" data-tenant-id="${tenantId}"></script>`;
 
     return (
         <div>

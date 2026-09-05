@@ -1,59 +1,45 @@
 "use client"
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 
 export default function PendingPage() {
+    const { session, status, role, loading, refetchUserInfo } = useAuth();
     const router = useRouter();
-    const [checking, setChecking] = useState(false);
 
-    // If someone lands here who's already active (e.g. they got approved,
-    // then revisited this page from a bookmark), bounce them to the real dashboard.
+    // Redirect immediately if already active (covers page load / refresh)
     useEffect(() => {
-        const checkStatus = async () => {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) {
-                router.push("/login");
-                return;
-            }
-            const { data: existingUser } = await supabase
-                .from("users")
-                .select("status, role")
-                .eq("user_id", user.id)
-                .maybeSingle();
-
-            if (existingUser?.status === "active") {
-                router.push(existingUser.role === "owner" ? "/dashboard" : "/dashboard/member");
-            }
-        };
-        checkStatus();
-    }, [router]);
-
-    const handleCheckAgain = async () => {
-        setChecking(true);
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) {
+        if (loading) return;
+        if (!session) {
             router.push("/login");
             return;
         }
-        const { data: existingUser } = await supabase
-            .from("users")
-            .select("status, role")
-            .eq("user_id", user.id)
-            .maybeSingle();
-
-        if (existingUser?.status === "active") {
-            router.push(existingUser.role === "owner" ? "/dashboard" : "/dashboard/member");
-        } else {
-            setChecking(false); // still pending, stay here
+        if (status === "active") {
+            router.push(role === "owner" ? "/dashboard" : "/dashboard/member");
         }
-    };
+    }, [loading, session, status, role, router]);
+
+    // Poll every 15s while sitting on this page, in case an owner approves us mid-wait
+    useEffect(() => {
+        if (loading || !session) return;
+
+        const interval = setInterval(() => {
+            refetchUserInfo();
+        }, 15000);
+
+        return () => clearInterval(interval);
+    }, [loading, session, refetchUserInfo]);
 
     const handleLogout = async () => {
         await supabase.auth.signOut();
         router.push("/login");
     };
+
+    if (loading) {
+        return <div className="flex min-h-screen items-center justify-center">Loading...</div>;
+    }
 
     return (
         <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8 text-center">
@@ -62,13 +48,9 @@ export default function PendingPage() {
                 Your account has been created, but a team owner still needs to approve your access.
                 You&apos;ll be able to log in normally once that happens.
             </p>
-            <button
-                onClick={handleCheckAgain}
-                disabled={checking}
-                className="rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800 disabled:opacity-50"
-            >
-                {checking ? "Checking..." : "Check again"}
-            </button>
+            <p className="text-xs text-gray-500">
+                This page checks automatically every few seconds — no need to refresh.
+            </p>
             <button onClick={handleLogout} className="text-sm text-gray-500 underline">
                 Log out
             </button>

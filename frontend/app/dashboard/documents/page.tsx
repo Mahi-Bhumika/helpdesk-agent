@@ -4,6 +4,7 @@ import { useDropzone } from "react-dropzone";
 import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
+import { authedFetch } from "@/lib/api";
 
 type Doc = {
     document_id: string;
@@ -47,9 +48,8 @@ export default function DocumentsPage() {
             setStatus("uploading");
 
             try {
-                const createRes = await fetch("https://helpdesk-agent-9eu9.onrender.com/documents", {
+                const createRes = await authedFetch("/documents", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         tenant_id: tenantId,
                         format: "pdf",
@@ -66,7 +66,7 @@ export default function DocumentsPage() {
                 formData.append("tenant_id", tenantId);
                 formData.append("file", file);
 
-                const uploadRes = await fetch("https://helpdesk-agent-9eu9.onrender.com/kb/upload", {
+                const uploadRes = await authedFetch("/kb/upload", {
                     method: "POST",
                     body: formData,
                 });

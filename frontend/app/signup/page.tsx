@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
@@ -16,9 +16,9 @@ type SignupForm = {
     themeColor: string;
 };
 
-export default function SignupPage() {
+function SignupForm() {
     const searchParams = useSearchParams();
-    const inviteToken = searchParams.get("invite"); // null for owner signup, a real token for invited members
+    const inviteToken = searchParams.get("invite");
 
     const [formData, setFormData] = useState<SignupForm>({
         email: "",
@@ -64,14 +64,11 @@ export default function SignupPage() {
             return;
         }
 
-        // Tenant/invite linking now happens at first LOGIN (after email confirmation),
-        // not here — signUp() doesn't return a usable session when confirmation is required,
-        // so there's no token yet to safely authenticate that call.
         setSuccess(true);
     };
 
     return (
-        <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
+        <>
             <h1 className="text-2xl font-bold">
                 {inviteToken ? "Join your team" : "Sign up"}
             </h1>
@@ -107,9 +104,6 @@ export default function SignupPage() {
                         required
                     />
 
-                    {/* Invited members are joining an existing tenant — they don't set up
-                        company/bot details, that's the owner's job. Only show these fields
-                        for a fresh owner signup (no invite token in the URL). */}
                     {!inviteToken && (
                         <>
                             <input
@@ -166,7 +160,16 @@ export default function SignupPage() {
                     </button>
                 </form>
             )}
+        </>
+    );
+}
 
+export default function SignupPage() {
+    return (
+        <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
+            <Suspense fallback={<div>Loading...</div>}>
+                <SignupForm />
+            </Suspense>
             <Link href="/" className="text-sm text-gray-500 underline">
                 ← Back to home
             </Link>

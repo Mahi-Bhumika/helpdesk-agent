@@ -6,7 +6,7 @@ import { useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-    const { session, loading } = useAuth();
+    const { session, loading, role } = useAuth();
     const router = useRouter();
 
     useEffect(() => {
@@ -28,6 +28,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <nav className="w-56 border-r p-4 flex flex-col">
                 <a href="/dashboard/analytics">Analytics</a>
                 <a href="/dashboard/settings">Bot Settings</a>
+                {role === "owner" && (
+                    <a href="/dashboard/embed">Embed Script</a>
+                )}
                 <a href="/dashboard/sessions">Chat Sessions</a>
                 <a href="/dashboard/documents">Documents & FAQs</a>
                 {/* TODO: Admin section, gated by role */}

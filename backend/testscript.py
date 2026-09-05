@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from supabase import create_client
 
-load_dotenv('.env.local')
+load_dotenv('.env')
 
 def create_document():
     url = f"{os.getenv('API_BASE_URL')}/documents"

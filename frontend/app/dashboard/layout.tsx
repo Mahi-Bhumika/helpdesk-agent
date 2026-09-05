@@ -52,8 +52,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 )}
                 <a href="/dashboard/sessions">Chat Sessions</a>
                 <a href="/dashboard/documents">Documents & FAQs</a>
-                <a href="/dashboard/embed">Embed Script</a>
-                {/* TODO: Admin section, gated by role */}
                 <button
                     onClick={async () => {
                         await supabase.auth.signOut();

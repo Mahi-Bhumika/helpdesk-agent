@@ -2,20 +2,39 @@
 
 import { useAuth } from "@/lib/auth-context";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const { session, loading, role } = useAuth();
     const router = useRouter();
+    const [statusChecked, setStatusChecked] = useState(false);
 
     useEffect(() => {
-        if (!loading && !session) {
+        if (loading) return;
+
+        if (!session) {
             router.push("/login");
+            return;
         }
+
+        const checkStatus = async () => {
+            const { data: existingUser } = await supabase
+                .from("users")
+                .select("status")
+                .eq("user_id", session.user.id)
+                .maybeSingle();
+
+            if (existingUser?.status !== "active") {
+                router.push("/pending");
+                return;
+            }
+            setStatusChecked(true);
+        };
+        checkStatus();
     }, [loading, session, router]);
 
-    if (loading) {
+    if (loading || !statusChecked) {
         return <div className="flex min-h-screen items-center justify-center">Loading...</div>;
     }
 
@@ -33,6 +52,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 )}
                 <a href="/dashboard/sessions">Chat Sessions</a>
                 <a href="/dashboard/documents">Documents & FAQs</a>
+                <a href="/dashboard/embed">Embed Script</a>
                 {/* TODO: Admin section, gated by role */}
                 <button
                     onClick={async () => {

@@ -411,3 +411,127 @@ async def update_website_domain(
     if row is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return dict(row._mapping)
+
+
+class InviteAccept(BaseModel):
+    invite_token: str
+    user_id: str
+    email: str
+
+
+@app.post("/invite/accept")
+async def accept_invite(
+    payload: InviteAccept,
+    verified_user_id: str = Depends(decode_jwt),
+    db: AsyncSession = Depends(get_db),
+):
+    if payload.user_id != verified_user_id:
+        raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
+
+    tenant_result = await db.execute(
+        text("SELECT tenant_id FROM tenants WHERE invite_token = :token"),
+        {"token": payload.invite_token},
+    )
+    tenant_row = tenant_result.fetchone()
+    if not tenant_row:
+        raise HTTPException(status_code=404, detail="Invalid invite link")
+
+    existing = await db.execute(
+        text("SELECT user_id FROM users WHERE user_id = :uid"), {"uid": payload.user_id}
+    )
+    if existing.fetchone():
+        raise HTTPException(status_code=409, detail="User already registered")
+
+    await db.execute(
+        text("""
+            INSERT INTO users (user_id, tenant_id, email, password_hash, role, status, invited_at)
+            VALUES (:user_id, :tenant_id, :email, :password_hash, 'member', 'pending', now())
+        """),
+        {
+            "user_id": payload.user_id,
+            "tenant_id": tenant_row.tenant_id,
+            "email": payload.email,
+            "password_hash": "MANAGED_BY_SUPABASE_AUTH",
+        },
+    )
+    await db.commit()
+    return {"status": "pending", "tenant_id": str(tenant_row.tenant_id)}
+
+class UserActionRequest(BaseModel):
+    user_id: str
+
+    
+@app.get("/admin/pending-users")
+async def get_pending_users(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+    result = await db.execute(
+        text("""
+            SELECT user_id, email, invited_at, created_at
+            FROM users
+            WHERE tenant_id = :tenant_id AND status = 'pending'
+            ORDER BY created_at ASC
+        """),
+        {"tenant_id": current_user["tenant_id"]},
+    )
+    rows = result.fetchall()
+    return [dict(row._mapping) for row in rows]
+
+class UserActionRequest(BaseModel):
+    user_id: str
+
+
+@app.post("/admin/approve-user")
+async def approve_user(
+    payload: UserActionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+    result = await db.execute(
+        text("""
+            UPDATE users
+            SET status = 'active', accepted_at = now()
+            WHERE user_id = :user_id AND tenant_id = :tenant_id AND status = 'pending'
+            RETURNING user_id, email, status
+        """),
+        {"user_id": payload.user_id, "tenant_id": current_user["tenant_id"]},
+    )
+    row = result.fetchone()
+    await db.commit()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No matching pending user found for your tenant")
+
+    return dict(row._mapping)
+
+@app.post("/admin/decline-user")
+async def decline_user(
+    payload: UserActionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if current_user["role"] != "owner":
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+    result = await db.execute(
+        text("""
+            DELETE FROM users
+            WHERE user_id = :user_id AND tenant_id = :tenant_id AND status = 'pending'
+            RETURNING user_id
+        """),
+        {"user_id": payload.user_id, "tenant_id": current_user["tenant_id"]},
+    )
+    row = result.fetchone()
+    await db.commit()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="No matching pending user found for your tenant")
+
+    return {"declined_user_id": payload.user_id}

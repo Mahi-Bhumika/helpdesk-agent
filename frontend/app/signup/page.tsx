@@ -1,7 +1,8 @@
 "use client"
 
 import Link from "next/link";
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
 type SignupForm = {
@@ -15,7 +16,10 @@ type SignupForm = {
     themeColor: string;
 };
 
-export default function SignupPage() {
+function SignupForm() {
+    const searchParams = useSearchParams();
+    const inviteToken = searchParams.get("invite");
+
     const [formData, setFormData] = useState<SignupForm>({
         email: "",
         password: "",
@@ -42,6 +46,12 @@ export default function SignupPage() {
         const { data, error: authError } = await supabase.auth.signUp({
             email: formData.email,
             password: formData.password,
+            options: {
+                emailRedirectTo: `${window.location.origin}/login`,
+                data: inviteToken
+                    ? { invite_token: inviteToken }
+                    : { pending_tenant_setup: JSON.stringify(formData) },
+            },
         });
 
         if (authError) {
@@ -54,32 +64,14 @@ export default function SignupPage() {
             return;
         }
 
-        const res = await fetch("https://helpdesk-agent-9eu9.onrender.com/tenants", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                owner_id: data.user?.id,
-                owner_email: formData.email, 
-                company_name: formData.companyName,
-                type_of_business: formData.typeOfBusiness,
-                subscription_plan: formData.subscriptionPlan,
-                bot_name: formData.botName,
-                greeting_message: formData.greetingMessage,
-                theme_color: formData.themeColor,
-            }),
-        });
-
-        if (!res.ok) {
-            setError("Account created, but tenant setup failed. Contact support.");
-            return;
-        }
-
         setSuccess(true);
     };
 
     return (
-        <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
-            <h1 className="text-2xl font-bold">Sign up</h1>
+        <>
+            <h1 className="text-2xl font-bold">
+                {inviteToken ? "Join your team" : "Sign up"}
+            </h1>
 
             {success ? (
                 <div className="flex max-w-sm flex-col items-center gap-3 text-center">
@@ -111,48 +103,54 @@ export default function SignupPage() {
                         className="rounded-md border border-gray-300 px-3 py-2"
                         required
                     />
-                    <input
-                        type="text"
-                        placeholder="Company name"
-                        value={formData.companyName}
-                        onChange={handleChange("companyName")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                        required
-                    />
-                    <input
-                        type="text"
-                        placeholder="Type of business (e.g. e-commerce, SaaS)"
-                        value={formData.typeOfBusiness}
-                        onChange={handleChange("typeOfBusiness")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                    <input
-                        type="text"
-                        placeholder="Subscription plan"
-                        value={formData.subscriptionPlan}
-                        onChange={handleChange("subscriptionPlan")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                    <input
-                        type="text"
-                        placeholder="Bot name"
-                        value={formData.botName}
-                        onChange={handleChange("botName")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                    <textarea
-                        placeholder="Bot greeting message"
-                        value={formData.greetingMessage}
-                        onChange={handleChange("greetingMessage")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                    <input
-                        type="text"
-                        placeholder="Theme color (e.g. #4F46E5)"
-                        value={formData.themeColor}
-                        onChange={handleChange("themeColor")}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
+
+                    {!inviteToken && (
+                        <>
+                            <input
+                                type="text"
+                                placeholder="Company name"
+                                value={formData.companyName}
+                                onChange={handleChange("companyName")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                                required
+                            />
+                            <input
+                                type="text"
+                                placeholder="Type of business (e.g. e-commerce, SaaS)"
+                                value={formData.typeOfBusiness}
+                                onChange={handleChange("typeOfBusiness")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                            />
+                            <input
+                                type="text"
+                                placeholder="Subscription plan"
+                                value={formData.subscriptionPlan}
+                                onChange={handleChange("subscriptionPlan")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                            />
+                            <input
+                                type="text"
+                                placeholder="Bot name"
+                                value={formData.botName}
+                                onChange={handleChange("botName")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                            />
+                            <textarea
+                                placeholder="Bot greeting message"
+                                value={formData.greetingMessage}
+                                onChange={handleChange("greetingMessage")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                            />
+                            <input
+                                type="text"
+                                placeholder="Theme color (e.g. #4F46E5)"
+                                value={formData.themeColor}
+                                onChange={handleChange("themeColor")}
+                                className="rounded-md border border-gray-300 px-3 py-2"
+                            />
+                        </>
+                    )}
+
                     {error && <p className="text-sm text-red-600">{error}</p>}
                     <button
                         type="submit"
@@ -162,7 +160,16 @@ export default function SignupPage() {
                     </button>
                 </form>
             )}
+        </>
+    );
+}
 
+export default function SignupPage() {
+    return (
+        <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8">
+            <Suspense fallback={<div>Loading...</div>}>
+                <SignupForm />
+            </Suspense>
             <Link href="/" className="text-sm text-gray-500 underline">
                 ← Back to home
             </Link>

@@ -411,3 +411,48 @@ async def update_website_domain(
     if row is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return dict(row._mapping)
+
+
+class InviteAccept(BaseModel):
+    invite_token: str
+    user_id: str
+    email: str
+
+
+@app.post("/invite/accept")
+async def accept_invite(
+    payload: InviteAccept,
+    verified_user_id: str = Depends(decode_jwt),
+    db: AsyncSession = Depends(get_db),
+):
+    if payload.user_id != verified_user_id:
+        raise HTTPException(status_code=403, detail="user_id does not match authenticated user")
+
+    tenant_result = await db.execute(
+        text("SELECT tenant_id FROM tenants WHERE invite_token = :token"),
+        {"token": payload.invite_token},
+    )
+    tenant_row = tenant_result.fetchone()
+    if not tenant_row:
+        raise HTTPException(status_code=404, detail="Invalid invite link")
+
+    existing = await db.execute(
+        text("SELECT user_id FROM users WHERE user_id = :uid"), {"uid": payload.user_id}
+    )
+    if existing.fetchone():
+        raise HTTPException(status_code=409, detail="User already registered")
+
+    await db.execute(
+        text("""
+            INSERT INTO users (user_id, tenant_id, email, password_hash, role, status, invited_at)
+            VALUES (:user_id, :tenant_id, :email, :password_hash, 'member', 'pending', now())
+        """),
+        {
+            "user_id": payload.user_id,
+            "tenant_id": tenant_row.tenant_id,
+            "email": payload.email,
+            "password_hash": "MANAGED_BY_SUPABASE_AUTH",
+        },
+    )
+    await db.commit()
+    return {"status": "pending", "tenant_id": str(tenant_row.tenant_id)}

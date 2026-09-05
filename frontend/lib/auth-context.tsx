@@ -26,7 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             .from("users")
             .select("tenant_id")
             .eq("user_id", userId)
-            .single();
+            .maybeSingle();
         if (!error && data) setTenantId(data.tenant_id);
     }
 

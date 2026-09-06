@@ -3,6 +3,7 @@
 import { useAuth } from "@/lib/auth-context";
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
 
 type EmbedSettings = {
     tenantId : string;
@@ -15,6 +16,7 @@ type EmbedSettings = {
 };
 
 function generateEmbedSnippets(settings : EmbedSettings ) {
+  
   const { tenantId, name, apiUrl, color, position, greeting, cdnUrl } = settings;
 
   const html = `<script
@@ -57,6 +59,17 @@ const jsx = `<script
 }
 
 export default function EmbedPage() {
+
+    const { role, loading : authLoading } = useAuth();
+    const router = useRouter();
+
+    useEffect(() => {
+      if (!authLoading && role !== "owner") {
+        router.push("/dashboard/member");
+      }
+    }, [authLoading, role, router]);
+
+
     const { session }  = useAuth();
     const [format, setFormat] = useState<"html" | "jsx" | "nextTsx">("html");
     const [tenantId, setTenantId] = useState("");

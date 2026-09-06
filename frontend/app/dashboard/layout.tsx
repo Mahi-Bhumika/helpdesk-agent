@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-    const { session, loading, role } = useAuth();
+    const { session, loading, role, status } = useAuth();
     const router = useRouter();
     const [statusChecked, setStatusChecked] = useState(false);
 
@@ -17,27 +17,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             router.push("/login");
             return;
         }
+        if (status !== "active") {
+        router.push("/pending");
+        return;
+        }
 
-        const checkStatus = async () => {
-            const { data: existingUser } = await supabase
-                .from("users")
-                .select("status")
-                .eq("user_id", session.user.id)
-                .maybeSingle();
-
-            if (existingUser?.status !== "active") {
-                router.push("/pending");
-                return;
-            }
-            setStatusChecked(true);
-        };
-        checkStatus();
-    }, [loading, session, router]);
+        setStatusChecked(true);
+    }, [loading, session, status, router]);
 
     if (loading || !statusChecked) {
-        return <div className="flex min-h-screen items-center justify-center">Loading...</div>;
+        return <div className="flex min-h-screen items-center justify-center">Loading...</div>
     }
-
     if (!session) {
         return null;
     }
@@ -48,7 +38,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <a href="/dashboard/analytics">Analytics</a>
                 <a href="/dashboard/settings">Bot Settings</a>
                 {role === "owner" && (
+                    <>
                     <a href="/dashboard/embed">Embed Script</a>
+                    <a href="/dashboard/admin/invites">Invites</a>
+                    </>
                 )}
                 <a href="/dashboard/sessions">Chat Sessions</a>
                 <a href="/dashboard/documents">Documents & FAQs</a>

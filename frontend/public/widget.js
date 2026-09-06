@@ -1,31 +1,3 @@
-/**
- * Bot AI — Embeddable Chat Widget
-
- * Usage on a tenant's site:
- *   <script src="https://cdn.example.com/widget.js"
- *           data-tenant-id="TENANT_UUID"
- *           data-api-url="https://api.example.com"
- *           data-color="#5B5BF0"
- *           data-position="bottom-right"
- *           data-greeting="Hi! How can I help you today?"
- *           defer></script>
- *
- * ---------------------------------------------------------------
- * API CONTRACT — now actually implemented below
- * ---------------------------------------------------------------
- * POST {apiUrl}/chat
- *   request:  {
- *     tenant_id: string (uuid),
- *     session_id: string (uuid) | null,   // null on first message
- *     question: string,
- *     top_k: number
- *   }
- *   response: {
- *     session_id: string (uuid), 
- *     answer: string,
- *     sources: Array<{ chunk_id: string, relevance_score: number }>
- *   }
- */
 
 (function () {
   "use strict";
@@ -36,14 +8,15 @@
       document.querySelector("script[data-tenant-id]");
 
     if (!scriptTag) {
-      console.error("[HIKA Widget] Could not locate its own <script> tag.");
+      console.error("[BotAI Widget] Could not locate its own <script> tag.");
       return;
     }
 
     var config = {
       tenantId: scriptTag.getAttribute("data-tenant-id"),
+      botName : scriptTag.getAttribute("data-name") || "Chat",
       apiUrl: scriptTag.getAttribute("data-api-url") || "",
-      color: scriptTag.getAttribute("data-color") || " #9e5bf0",
+      color: scriptTag.getAttribute("data-color") || "#5B5BF0",
       position: scriptTag.getAttribute("data-position") || "bottom-right",
       greeting:
         scriptTag.getAttribute("data-greeting") ||
@@ -52,13 +25,13 @@
 
     if (!config.tenantId) {
       console.error(
-        "[HIKA Widget] Missing required data-tenant-id attribute — widget not mounted."
+        "[BotAI Widget] Missing required data-tenant-id attribute — widget not mounted."
       );
       return;
     }
     if (!config.apiUrl) {
       console.error(
-        "[HIKA Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail."
+        "[BotAI Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail."
       );
     }
 
@@ -79,32 +52,32 @@
     shadow.appendChild(style);
 
     var root = document.createElement("div");
-    root.className = "HIKA-widget-root HIKA-widget-" + config.position;
+    root.className = "botai-widget-root botai-widget-" + config.position;
     root.innerHTML =
-      '<button class="HIKA-bubble" type="button" aria-label="Open chat" aria-expanded="false">' +
+      '<button class="botai-bubble" type="button" aria-label="Open chat" aria-expanded="false">' +
         bubbleIcon() +
       "</button>" +
-      '<div class="HIKA-panel" hidden>' +
-        '<div class="HIKA-panel-header">' +
-          '<span class="HIKA-panel-title">Chat</span>' +
-          '<button class="HIKA-close" type="button" aria-label="Close chat">' + closeIcon() + "</button>" +
+      '<div class="botai-panel" hidden>' +
+        '<div class="botai-panel-header">' +
+          '<span class="botai-panel-title">' + config.botName + '</span>' +
+          '<button class="botai-close" type="button" aria-label="Close chat">' + closeIcon() + "</button>" +
         "</div>" +
-        '<div class="HIKA-panel-body">' +
-          '<div class="HIKA-messages" aria-live="polite"></div>' +
+        '<div class="botai-panel-body">' +
+          '<div class="botai-messages" aria-live="polite"></div>' +
         "</div>" +
-        '<div class="HIKA-panel-footer">' +
-          '<input type="text" class="HIKA-input" placeholder="Type your question…" aria-label="Message" />' +
-          '<button class="HIKA-send" type="button" aria-label="Send message">' + sendIcon() + "</button>" +
+        '<div class="botai-panel-footer">' +
+          '<input type="text" class="botai-input" placeholder="Type your question…" aria-label="Message" />' +
+          '<button class="botai-send" type="button" aria-label="Send message">' + sendIcon() + "</button>" +
         "</div>" +
       "</div>";
     shadow.appendChild(root);
 
-    var bubble = root.querySelector(".HIKA-bubble");
-    var panel = root.querySelector(".HIKA-panel");
-    var closeBtn = root.querySelector(".HIKA-close");
-    var messagesEl = root.querySelector(".HIKA-messages");
-    var inputEl = root.querySelector(".HIKA-input");
-    var sendBtn = root.querySelector(".HIKA-send");
+    var bubble = root.querySelector(".botai-bubble");
+    var panel = root.querySelector(".botai-panel");
+    var closeBtn = root.querySelector(".botai-close");
+    var messagesEl = root.querySelector(".botai-messages");
+    var inputEl = root.querySelector(".botai-input");
+    var sendBtn = root.querySelector(".botai-send");
 
     var hasGreeted = false;
     var sessionId = null;
@@ -116,7 +89,7 @@
     // as HTML/script.
     function appendMessage(text, sender) {
       var msg = document.createElement("div");
-      msg.className = "HIKA-msg HIKA-msg-" + sender;
+      msg.className = "botai-msg botai-msg-" + sender;
       msg.textContent = text;
       messagesEl.appendChild(msg);
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -125,10 +98,10 @@
 
     function appendTyping() {
       var wrap = document.createElement("div");
-      wrap.className = "HIKA-msg HIKA-msg-bot HIKA-typing";
+      wrap.className = "botai-msg botai-msg-bot botai-typing";
       wrap.innerHTML =
-        '<span class="HIKA-typing-dots">' +
-          '<span class="HIKA-dot"></span><span class="HIKA-dot"></span><span class="HIKA-dot"></span>' +
+        '<span class="botai-typing-dots">' +
+          '<span class="botai-dot"></span><span class="botai-dot"></span><span class="botai-dot"></span>' +
         "</span>";
       messagesEl.appendChild(wrap);
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -213,7 +186,7 @@
           // this file itself can do — the real answer lives in the
           // Network tab, not the console.
           console.error(
-            "[HIKA Widget] /chat request failed. If this is a CORS " +
+            "[BotAI Widget] /chat request failed. If this is a CORS " +
               "error, it'll say so explicitly in the Network tab response " +
               "headers, not here. Target was: " + config.apiUrl + "/chat",
             err
@@ -241,7 +214,7 @@
 
     // Exposed on the light-DOM window for host-page integrations
     // (e.g. a "Chat with us" link elsewhere on the tenant's page).
-    window.__HIKAWidget = { config: config, open: openPanel, close: closePanel };
+    window.__botaiWidget = { config: config, open: openPanel, close: closePanel };
   }
 
   function bubbleIcon() {
@@ -279,49 +252,49 @@
       // *matching* from crossing the boundary. This is what makes the
       // widget survive a page with aggressive global CSS.
       ":host{all:initial;}" +
-      ".HIKA-widget-root{position:fixed;z-index:2147483000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}" +
-      ".HIKA-widget-bottom-right{right:20px;bottom:20px;}" +
-      ".HIKA-widget-bottom-left{left:20px;bottom:20px;}" +
-      ".HIKA-bubble{width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
+      ".botai-widget-root{position:fixed;z-index:2147483000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}" +
+      ".botai-widget-bottom-right{right:20px;bottom:20px;}" +
+      ".botai-widget-bottom-left{left:20px;bottom:20px;}" +
+      ".botai-bubble{width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
       "background:" + config.color + ";color:#fff;display:flex;align-items:center;justify-content:center;" +
       "box-shadow:0 8px 24px rgba(0,0,0,0.18);transition:transform 0.15s ease;padding:0;}" +
-      ".HIKA-bubble:hover{transform:scale(1.05);}" +
-      ".HIKA-bubble:focus-visible{outline:2px solid " + config.color + ";outline-offset:3px;}" +
-      ".HIKA-panel{position:absolute;bottom:72px;right:0;width:340px;max-width:calc(100vw - 40px);" +
+      ".botai-bubble:hover{transform:scale(1.05);}" +
+      ".botai-bubble:focus-visible{outline:2px solid " + config.color + ";outline-offset:3px;}" +
+      ".botai-panel{position:absolute;bottom:72px;right:0;width:340px;max-width:calc(100vw - 40px);" +
       "height:420px;max-height:calc(100vh - 120px);background:#fff;border-radius:16px;" +
       "box-shadow:0 12px 40px rgba(0,0,0,0.2);display:flex;flex-direction:column;overflow:hidden;}" +
-      ".HIKA-widget-bottom-left .HIKA-panel{right:auto;left:0;}" +
-      ".HIKA-panel[hidden]{display:none;}" +
-      ".HIKA-panel-header{background:" + config.color + ";color:#fff;padding:14px 16px;" +
+      ".botai-widget-bottom-left .botai-panel{right:auto;left:0;}" +
+      ".botai-panel[hidden]{display:none;}" +
+      ".botai-panel-header{background:" + config.color + ";color:#fff;padding:14px 16px;" +
       "display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}" +
-      ".HIKA-panel-title{font-weight:600;font-size:15px;}" +
-      ".HIKA-close{background:none;border:none;color:#fff;cursor:pointer;padding:2px;display:flex;opacity:0.85;}" +
-      ".HIKA-close:hover{opacity:1;}" +
-      ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;}" +
-      ".HIKA-messages{display:flex;flex-direction:column;gap:8px;}" +
-      ".HIKA-msg{max-width:80%;padding:9px 13px;border-radius:14px;font-size:13.5px;" +
+      ".botai-panel-title{font-weight:600;font-size:15px;}" +
+      ".botai-close{background:none;border:none;color:#fff;cursor:pointer;padding:2px;display:flex;opacity:0.85;}" +
+      ".botai-close:hover{opacity:1;}" +
+      ".botai-panel-body{flex:1;padding:16px;overflow-y:auto;}" +
+      ".botai-messages{display:flex;flex-direction:column;gap:8px;}" +
+      ".botai-msg{max-width:80%;padding:9px 13px;border-radius:14px;font-size:13.5px;" +
       "line-height:1.4;word-wrap:break-word;white-space:pre-wrap;}" +
-      ".HIKA-msg-bot{align-self:flex-start;background:#f1f1f4;color:#26262e;" +
+      ".botai-msg-bot{align-self:flex-start;background:#f1f1f4;color:#26262e;" +
       "border-bottom-left-radius:4px;}" +
-      ".HIKA-msg-user{align-self:flex-end;background:" + config.color + ";color:#fff;" +
+      ".botai-msg-user{align-self:flex-end;background:" + config.color + ";color:#fff;" +
       "border-bottom-right-radius:4px;}" +
-      ".HIKA-typing-dots{display:inline-flex;gap:4px;align-items:center;padding:2px 0;}" +
-      ".HIKA-typing-dots .HIKA-dot{width:6px;height:6px;border-radius:50%;background:#9a9aa4;" +
-      "animation:HIKA-bounce 1.2s infinite ease-in-out;}" +
-      ".HIKA-typing-dots .HIKA-dot:nth-child(2){animation-delay:0.15s;}" +
-      ".HIKA-typing-dots .HIKA-dot:nth-child(3){animation-delay:0.3s;}" +
-      "@keyframes HIKA-bounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-4px);opacity:1;}}" +
-      ".HIKA-panel-footer{flex-shrink:0;display:flex;align-items:center;gap:8px;" +
+      ".botai-typing-dots{display:inline-flex;gap:4px;align-items:center;padding:2px 0;}" +
+      ".botai-typing-dots .botai-dot{width:6px;height:6px;border-radius:50%;background:#9a9aa4;" +
+      "animation:botai-bounce 1.2s infinite ease-in-out;}" +
+      ".botai-typing-dots .botai-dot:nth-child(2){animation-delay:0.15s;}" +
+      ".botai-typing-dots .botai-dot:nth-child(3){animation-delay:0.3s;}" +
+      "@keyframes botai-bounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-4px);opacity:1;}}" +
+      ".botai-panel-footer{flex-shrink:0;display:flex;align-items:center;gap:8px;" +
       "padding:10px 12px;border-top:1px solid #ececef;}" +
-      ".HIKA-input{flex:1;border:1px solid #dcdce2;border-radius:20px;padding:8px 14px;" +
+      ".botai-input{flex:1;border:1px solid #dcdce2;border-radius:20px;padding:8px 14px;" +
       "font-size:13.5px;outline:none;font-family:inherit;box-sizing:border-box;}" +
-      ".HIKA-input:focus{border-color:" + config.color + ";}" +
-      ".HIKA-input:disabled{background:#f7f7f9;cursor:not-allowed;}" +
-      ".HIKA-send{flex-shrink:0;width:34px;height:34px;border-radius:50%;border:none;" +
+      ".botai-input:focus{border-color:" + config.color + ";}" +
+      ".botai-input:disabled{background:#f7f7f9;cursor:not-allowed;}" +
+      ".botai-send{flex-shrink:0;width:34px;height:34px;border-radius:50%;border:none;" +
       "background:" + config.color + ";color:#fff;display:flex;align-items:center;" +
       "justify-content:center;cursor:pointer;padding:0;}" +
-      ".HIKA-send:hover{opacity:0.9;}" +
-      ".HIKA-send:disabled{opacity:.5;cursor:not-allowed;}"
+      ".botai-send:hover{opacity:0.9;}" +
+      ".botai-send:disabled{opacity:.5;cursor:not-allowed;}"
     );
   }
 

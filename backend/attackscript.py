@@ -86,15 +86,18 @@ FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", "").rstrip("/")
 TENANT_A_EMAIL = os.getenv("TENANT_A_EMAIL", "")
 TENANT_A_PASSWORD = os.getenv("TENANT_A_PASSWORD", "")
 TENANT_A_ID = os.getenv("TENANT_A_ID", "")
+TENANT_A_MESSAGE_ID = os.getenv("TENANT_A_MESSAGE_ID", "")
+TENANT_A_CHUNK_ID = os.getenv("TENANT_A_CHUNK_ID","")
 
 TENANT_B_EMAIL = os.getenv("TENANT_B_EMAIL", "")
 TENANT_B_PASSWORD = os.getenv("TENANT_B_PASSWORD", "")
 TENANT_B_ID = os.getenv("TENANT_B_ID", "")
+TENANT_B_MESSAGE_ID = os.getenv("TENANT_B_MESSAGE_ID", "")
 
 REQUIRED_VARS = [
     "SUPABASE_URL", "SUPABASE_ANON_KEY", "FASTAPI_BASE_URL",
-    "TENANT_A_EMAIL", "TENANT_A_PASSWORD", "TENANT_A_ID",
-    "TENANT_B_EMAIL", "TENANT_B_PASSWORD", "TENANT_B_ID",
+    "TENANT_A_EMAIL", "TENANT_A_PASSWORD", "TENANT_A_ID", "TENANT_A_MESSAGE_ID", "TENANT_A_CHUNK_ID",
+    "TENANT_B_EMAIL", "TENANT_B_PASSWORD", "TENANT_B_ID", "TENANT_B_MESSAGE_ID"
 ]
 
 
@@ -159,11 +162,7 @@ def _write_payloads(victim_tenant_id: str):
  
 # Tables intentionally excluded from automated read and/or write tests,
 # with the reason, so the report doesn't silently look "clean" for them.
-SKIPPED = {
-    "message_sources": "no tenant_id column — needs a manual test via a "
-                        "known message_id once one has leaked; RLS here "
-                        "must be join/EXISTS-based, not a plain compare",
-}
+SKIPPED = {}
  
  
 # ---------------------------------------------------------------------------
@@ -269,7 +268,133 @@ def attack_supabase_write(table: str, attacker_jwt: str, payload: dict) -> dict:
     return _result("supabase_direct", table, "write", "CHECK",
                     f"insert blocked ({resp.status_code}), but not confirmed as "
                     f"an RLS block — read this before trusting it: {resp.text[:200]}")
- 
+
+ # ---------------------------------------------------------------------------
+# message_sources — join-based attack (no tenant_id column on this table)
+# ---------------------------------------------------------------------------
+
+def _supabase_message_sources_count(message_id: str, jwt: str):
+    """Returns (row_count, error_detail_or_None) for message_sources rows
+    tied to a given message_id."""
+    url = f"{SUPABASE_URL}/rest/v1/message_sources?message_id=eq.{message_id}&select=*"
+    try:
+        resp = requests.get(url, headers=supabase_headers(jwt), timeout=15)
+    except requests.RequestException as e:
+        return None, f"request error: {e}"
+    if resp.status_code != 200:
+        return None, f"unexpected status {resp.status_code}: {resp.text[:200]}"
+    rows = resp.json()
+    return len(rows) if isinstance(rows, list) else None, None
+
+
+def attack_supabase_message_sources_read(attacker_jwt: str) -> dict:
+    """
+    Same two-query pattern as attack_supabase_read, adapted for a table with
+    no tenant_id column:
+      1. attacker -> a message_id belonging to the VICTIM tenant (the real
+         attack; should return 0 rows if the join-based RLS policy through
+         `messages` is actually working)
+      2. attacker -> a message_id belonging to the ATTACKER's OWN tenant
+         (control — proves the table isn't just locked for everyone, which
+         would make a 0-row "win" on the first query meaningless)
+
+    Requires TENANT_B_MESSAGE_ID and TENANT_A_MESSAGE_ID in .env.attack.
+    Returns CHECK (not a false PASS/FAIL) if either is missing.
+    """
+    if not TENANT_B_MESSAGE_ID or not TENANT_A_MESSAGE_ID:
+        return _result("supabase_direct", "message_sources", "read", "CHECK",
+                        "TENANT_B_MESSAGE_ID and/or TENANT_A_MESSAGE_ID not set in "
+                        ".env.attack — grab real message_id values for each tenant "
+                        "directly from the Supabase Table Editor/SQL editor "
+                        "(select message_id from messages where tenant_id = ...), "
+                        "not via the API, then re-run")
+
+    cross_count, cross_err = _supabase_message_sources_count(TENANT_B_MESSAGE_ID, attacker_jwt)
+    if cross_err:
+        return _result("supabase_direct", "message_sources", "read", "CHECK", cross_err)
+
+    if cross_count > 0:
+        return _result("supabase_direct", "message_sources", "read", "FAIL",
+                        f"{cross_count} row(s) leaked for victim's message_id "
+                        f"{TENANT_B_MESSAGE_ID}")
+
+    self_count, self_err = _supabase_message_sources_count(TENANT_A_MESSAGE_ID, attacker_jwt)
+    if self_err:
+        return _result("supabase_direct", "message_sources", "read", "CHECK",
+                        f"0 rows for victim's message_id, but control query failed: {self_err}")
+
+    if self_count > 0:
+        return _result("supabase_direct", "message_sources", "read", "PASS",
+                        f"0 rows for victim's message_id {TENANT_B_MESSAGE_ID}; "
+                        f"{self_count} row(s) of own message_id {TENANT_A_MESSAGE_ID} "
+                        f"confirmed readable — real join-based isolation, not a blanket lockout")
+
+    return _result("supabase_direct", "message_sources", "read", "CHECK",
+                    f"0 rows for BOTH victim's and attacker's own message_id "
+                    f"({TENANT_A_MESSAGE_ID}) — can't confirm real isolation vs. the join "
+                    f"policy being broken/missing entirely, not just correctly blocking "
+                    f"cross-tenant access. Confirm via the Table Editor that "
+                    f"TENANT_A_MESSAGE_ID actually has a message_sources row.")
+
+def _message_sources_write_payload(victim_message_id: str, attacker_chunk_id: str) -> dict:
+    return {
+        "message_id": victim_message_id,      # NOT attacker's — this is the attack
+        "chunk_id": attacker_chunk_id,         # must be real, satisfies the FK
+        "relevance_score": -999.0,             # impossible real value, easy to spot/clean up
+    }
+
+
+def attack_supabase_message_sources_write(attacker_jwt: str, victim_message_id: str,
+                                           attacker_chunk_id: str) -> dict:
+    """
+    Attempts to attach the attacker's own (real, FK-valid) chunk as a fabricated
+    'source' on a message that belongs to the victim tenant. Tests whether the
+    join-based RLS policy's WITH CHECK actually verifies message_id belongs to
+    the requester's own tenant, or only checks it on SELECT.
+
+    CAUTION: if this succeeds (FAIL), it writes a REAL row into message_sources
+    tagged relevance_score = -999.0. Clean it up manually after each run:
+      delete from message_sources where relevance_score = -999.0;
+    """
+    if not victim_message_id or not attacker_chunk_id:
+        return _result("supabase_direct", "message_sources", "write", "CHECK",
+                        "VICTIM_MESSAGE_ID and/or ATTACKER_CHUNK_ID not set in "
+                        ".env.attack — needed to run this attack safely (FK-valid "
+                        "chunk_id, real victim message_id)")
+
+    payload = _message_sources_write_payload(victim_message_id, attacker_chunk_id)
+    url = f"{SUPABASE_URL}/rest/v1/message_sources"
+    try:
+        resp = requests.post(
+            url,
+            headers={**supabase_headers(attacker_jwt), "Prefer": "return=representation"},
+            json=payload,
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        return _result("supabase_direct", "message_sources", "write", "CHECK", f"request error: {e}")
+
+    if resp.status_code in (200, 201):
+        return _result("supabase_direct", "message_sources", "write", "FAIL",
+                        f"insert succeeded ({resp.status_code}): attacker's chunk "
+                        f"{attacker_chunk_id} attached to victim message "
+                        f"{victim_message_id} — REAL ROW WRITTEN, clean up manually "
+                        f"(relevance_score = -999.0)")
+
+    body_text = resp.text.lower()
+    if "row-level security" in body_text or "row level security" in body_text:
+        return _result("supabase_direct", "message_sources", "write", "PASS",
+                        f"blocked by RLS policy ({resp.status_code})")
+
+    if "foreign key" in body_text or "violates foreign key" in body_text:
+        return _result("supabase_direct", "message_sources", "write", "CHECK",
+                        f"blocked ({resp.status_code}), but by an FK constraint, not "
+                        f"confirmed RLS — check ATTACKER_CHUNK_ID is a real chunk_id "
+                        f"belonging to Tenant A: {resp.text[:200]}")
+
+    return _result("supabase_direct", "message_sources", "write", "CHECK",
+                    f"insert blocked ({resp.status_code}), but not confirmed as "
+                    f"an RLS block — read this before trusting it: {resp.text[:200]}")
  
 # ---------------------------------------------------------------------------
 # FastAPI attacks
@@ -409,12 +534,18 @@ def main():
           "with an own-data control query)...")
     for table in READ_TEST_TABLES:
         results.append(attack_supabase_read(table, tenant_a_jwt, TENANT_A_ID, TENANT_B_ID))
+    print("Running message_sources join-based read attack...")
+    results.append(attack_supabase_message_sources_read(tenant_a_jwt))
  
     if not args.read_only:
         print("Running Supabase-direct WRITE attacks (Tenant A -> Tenant B's tables)...")
         payloads = _write_payloads(TENANT_B_ID)
         for table, payload in payloads.items():
             results.append(attack_supabase_write(table, tenant_a_jwt, payload))
+        print("Running message_sources join-based write attack...")
+        results.append(attack_supabase_message_sources_write(
+            tenant_a_jwt, TENANT_B_MESSAGE_ID, TENANT_A_CHUNK_ID
+        ))
     else:
         print("Skipping write attacks (--read-only)")
  

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { authedFetch } from "@/lib/api";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
 type PendingUser = {
     user_id: string;
@@ -15,7 +16,7 @@ type PendingUser = {
 
 export default function InvitesAdminPage() {
     
-    const { role, loading : authLoading} = useAuth();
+    const { role, loading : authLoading, tenantId} = useAuth();
     const router = useRouter();
 
     useEffect(() => {
@@ -29,6 +30,45 @@ export default function InvitesAdminPage() {
     const [loading, setLoading] = useState(true);
     const [actioningId, setActioningId] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+
+     // Invite link state
+    const [inviteToken, setInviteToken] = useState<string | null>(null);
+    const [inviteLoading, setInviteLoading] = useState(true);
+    const [copied, setCopied] = useState(false);
+
+     useEffect(() => {
+        if (!tenantId) return;
+
+        const fetchInviteToken = async () => {
+            const { data, error: tokenError } = await supabase
+                .from("tenants")
+                .select("invite_token")
+                .eq("tenant_id", tenantId)
+                .maybeSingle();
+
+            if (tokenError || !data) {
+                console.error("Could not fetch invite token:", tokenError);
+                setInviteLoading(false);
+                return;
+            }
+            setInviteToken(data.invite_token);
+            setInviteLoading(false);
+        };
+
+        fetchInviteToken();
+    }, [tenantId]);
+
+    const inviteUrl =
+        inviteToken && typeof window !== "undefined"
+            ? `${window.location.origin}/signup?invite=${inviteToken}`
+            : null;
+
+    const handleCopy = async () => {
+        if (!inviteUrl) return;
+        await navigator.clipboard.writeText(inviteUrl);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
 
     const fetchPending = useCallback(async () => {
         setLoading(true);

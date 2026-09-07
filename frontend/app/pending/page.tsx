@@ -10,16 +10,20 @@ export default function PendingPage() {
     const router = useRouter();
 
     // Redirect immediately if already active (covers page load / refresh)
-    useEffect(() => {
-        if (loading) return;
-        if (!session) {
-            router.push("/login");
-            return;
-        }
-        if (status === "active") {
-            router.push(role === "owner" ? "/dashboard" : "/dashboard/member");
-        }
-    }, [loading, session, status, role, router]);
+   useEffect(() => {
+    if (loading) return;
+    if (!session) {
+        router.push("/login");
+        return;
+    }
+    if (status === "declined") {
+        router.push("/declined");
+        return;
+    }
+    if (status === "active") {
+        router.push(role === "owner" ? "/dashboard" : "/dashboard/member");
+    }
+}, [loading, session, status, role, router]);
 
     // Poll every 15s while sitting on this page, in case an owner approves us mid-wait
     useEffect(() => {

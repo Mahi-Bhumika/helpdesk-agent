@@ -78,8 +78,11 @@ export default function LoginPage() {
                 await refetchUserInfo(); // <-- the actual fix: sync context before routing
                 router.push("/dashboard");
             }
-        } else {
-            if (existingUser.status === "pending") {
+                } else {
+            // Returning user — route by real status/role
+            if (existingUser.status === "declined") {
+                router.push("/declined");
+            } else if (existingUser.status === "pending") {
                 router.push("/pending");
             } else if (existingUser.role === "owner") {
                 router.push("/dashboard");
@@ -87,6 +90,7 @@ export default function LoginPage() {
                 router.push("/dashboard/member");
             }
         }
+        
     };
 
     return (

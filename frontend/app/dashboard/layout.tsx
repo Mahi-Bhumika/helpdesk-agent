@@ -11,19 +11,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const [statusChecked, setStatusChecked] = useState(false);
 
     useEffect(() => {
-        if (loading) return;
-
-        if (!session) {
-            router.push("/login");
-            return;
-        }
-        if (status !== "active") {
-        router.push("/pending");
+    if (loading) return;
+    if (!session) {
+        router.push("/login");
         return;
-        }
-
-        setStatusChecked(true);
-    }, [loading, session, status, router]);
+    }
+    if (status === "declined") {
+        router.push("/declined");
+        return;
+    }
+    if (status !== "active") {
+        router.push("/pending");
+    }
+}, [loading, session, status, router]);
 
     if (loading || !statusChecked) {
         return <div className="flex min-h-screen items-center justify-center">Loading...</div>

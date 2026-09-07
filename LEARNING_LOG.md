@@ -735,3 +735,53 @@ the attack script (Week 4's real focus), starting with my own Monday
 task — standing up a second test tenant with a different sample PDF,
 so there's something real for the attack script to try (and fail) to
 reach.
+
+
+# Week 4 — Security Audit + Auth Layer + Invite Flow (MAHI)
+
+## Mon
+- Read Supabase RLS docs (`auth.uid()`, custom claims, `SECURITY DEFINER`)
+- Audited `/chat` — found zero auth, `tenant_id` trusted straight from request body
+- Live-tested via curl: swapped `tenant_id`, no login, got another tenant's real chat data back
+- Root cause: `tenant_id` was doing scoping *and* authorization; only scoping was ever checked
+
+## Tue
+- Wrote `current_tenant_id()` / `is_active_user()` SECURITY DEFINER helpers (avoids RLS recursion)
+- Wrote `users`/`tenants` RLS policies
+- Audited `pg_policies` — found `documents`/`chat_sessions`/`messages` already had policies, none checking `status='active'`. Fixed all three
+- Bhumika built `cross_tenant_attack_test.py` (both paths: direct-Supabase + FastAPI)
+
+## Wed
+- Added RLS on `document_chunks` and `message_sources` (join-through-`messages`, no `tenant_id` column of its own)
+- Bhumika added a self-read control to the attack script — caught `end_users` having zero policies at all (blanket lockout, not real isolation)
+- Full re-run clean across every table
+
+## Thu
+- Full route audit: `GET`/`PUT /documents/{id}` had no tenant scoping at all; `/kb/upload` could inject fake chunks anywhere; `/tenants` never verified `owner_id`
+- Built `auth.py` (`decode_jwt`, `get_current_user`), retrofitted every tenant-touching route
+- Found mid-testing: Supabase signs JWTs with ES256/JWKS, not HS256 shared-secret — rewrote verification to use `PyJWKClient`
+- Found + fixed: UUID-vs-string tenant comparison bug, stale idle DB connection (500)
+- Verified everything with curl: valid/missing/mismatched token, all correct
+- Added `website_domain` + `/chat` Origin check (rejected a rotatable widget-key idea as overkill)
+- Bhumika built `authedFetch()`, wired into Documents page, tested live
+
+## Fri
+- Found: `signUp()` returns no session pre-confirmation — broke the existing `/tenants` call
+- Moved tenant/invite-linking out of signup, into first login instead
+- Built `POST /invite/accept`, rebuilt `login/page.tsx` as a 3-way branch
+- Built `/pending` (later: auto-polls every 15s via new `refetchUserInfo()`)
+- Fixed Vercel build crash (`useSearchParams()` needs `<Suspense>`)
+- Centralized `status`/`role` into `AuthProvider`, fixed a `.single()` race condition
+
+## Sat
+- Built `GET /admin/pending-users`, `POST /admin/approve-user`, `POST /admin/decline-user`
+- Owner-only (role checked server-side), tenant-scoped, `status='pending'` guarded in WHERE clauses
+- Not yet tested in isolation
+
+## Sun
+- Ran a real first-time signup end to end for the first time since Thursday's auth changes
+- Found + fixed: wrong env var name (`NEXT_PUBLIC_BACKEND_URL` vs. actual `NEXT_PUBLIC_API_URL`) — 404 on `/tenants`
+- Found + fixed: camelCase frontend fields spread directly into a snake_case Pydantic model — 422
+- Found: declined users were indistinguishable from users who never existed (hard DELETE on decline)
+- Reversed decline to `status='declined'` instead of DELETE; built `/declined` page; wired the new status into `login`, `dashboard/layout`, `pending`
+- Identified gap: no UI generates/displays the invite link (`invite_token` exists in DB, nothing surfaces it) — missing from both people's scope, not yet built

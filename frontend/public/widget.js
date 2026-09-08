@@ -76,6 +76,7 @@
     var panel = root.querySelector(".botai-panel");
     var closeBtn = root.querySelector(".botai-close");
     var messagesEl = root.querySelector(".botai-messages");
+    var panelBody = root.querySelector(".botai-panel-body");
     var inputEl = root.querySelector(".botai-input");
     var sendBtn = root.querySelector(".botai-send");
 
@@ -92,7 +93,7 @@
       msg.className = "botai-msg botai-msg-" + sender;
       msg.textContent = text;
       messagesEl.appendChild(msg);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
       return msg;
     }
 
@@ -104,7 +105,7 @@
           '<span class="botai-dot"></span><span class="botai-dot"></span><span class="botai-dot"></span>' +
         "</span>";
       messagesEl.appendChild(wrap);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
       return wrap;
     }
 

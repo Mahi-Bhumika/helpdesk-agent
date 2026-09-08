@@ -481,9 +481,6 @@ async def get_pending_users(
     rows = result.fetchall()
     return [dict(row._mapping) for row in rows]
 
-class UserActionRequest(BaseModel):
-    user_id: str
-
 
 @app.post("/admin/approve-user")
 async def approve_user(
@@ -510,31 +507,6 @@ async def approve_user(
         raise HTTPException(status_code=404, detail="No matching pending user found for your tenant")
 
     return dict(row._mapping)
-
-@app.post("/admin/decline-user")
-async def decline_user(
-    payload: UserActionRequest,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    if current_user["role"] != "owner":
-        raise HTTPException(status_code=403, detail="Owner access required")
-
-    result = await db.execute(
-        text("""
-            DELETE FROM users
-            WHERE user_id = :user_id AND tenant_id = :tenant_id AND status = 'pending'
-            RETURNING user_id
-        """),
-        {"user_id": payload.user_id, "tenant_id": current_user["tenant_id"]},
-    )
-    row = result.fetchone()
-    await db.commit()
-
-    if row is None:
-        raise HTTPException(status_code=404, detail="No matching pending user found for your tenant")
-
-    return {"declined_user_id": payload.user_id}
 
 @app.post("/admin/decline-user")
 async def decline_user(

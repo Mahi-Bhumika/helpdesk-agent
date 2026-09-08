@@ -10,7 +10,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const router = useRouter();
     const [statusChecked, setStatusChecked] = useState(false);
 
-    useEffect(() => {
+useEffect(() => {
     if (loading) return;
     if (!session) {
         router.push("/login");
@@ -22,7 +22,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
     if (status !== "active") {
         router.push("/pending");
+        return;
     }
+    setStatusChecked(true);
 }, [loading, session, status, router]);
 
     if (loading || !statusChecked) {

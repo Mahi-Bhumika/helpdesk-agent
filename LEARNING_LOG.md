@@ -785,3 +785,60 @@ reach.
 - Found: declined users were indistinguishable from users who never existed (hard DELETE on decline)
 - Reversed decline to `status='declined'` instead of DELETE; built `/declined` page; wired the new status into `login`, `dashboard/layout`, `pending`
 - Identified gap: no UI generates/displays the invite link (`invite_token` exists in DB, nothing surfaces it) — missing from both people's scope, not yet built
+
+# Week 4 — Full Log (Bhumika's side, Mon–Sun)
+
+## Mon
+- Stood up a second test tenant + uploaded a different sample PDF under it, so there was something real for the attack script to try (and fail) to reach.
+
+## Tue
+- Built `cross_tenant_attack_test.py` — the repeatable attack script, both paths: direct-Supabase (REST + JWT, the path Analytics/Settings/Documents pages actually use) and FastAPI (`/chat`). Logs in as Tenant A, tries to read/write Tenant B's data across every tenant-scoped table, logs PASS/FAIL/CHECK per table into `attack_log.md`.
+- Baseline run (before Mahi's RLS work): FAIL across the board on both paths, as expected — confirms the vuln she found manually with curl.
+
+## Wed
+- Reran after Mahi's RLS pass. Added a self-read control to the script (attacker checks their OWN tenant's data too, not just the victim's) — a table with RLS enabled but zero policy returns 0 rows for everyone, owner included, which would've looked identical to real isolation without the control.
+- Once real dummy rows existed in every table, the control caught something real: `end_users` had no SELECT policy at all — confirmed directly (0 rows even reading its own tenant's own data with a valid token), not an empty-table false positive. Flagged to Mahi.
+- Everything else (`tenants`, `users`, `documents`, `document_chunks`, `chat_sessions`, `messages`) came back clean: no cross-tenant leaks, each tenant can read/write its own data.
+
+## Thu
+- Built `lib/api.ts` — shared `authedFetch()` helper, pulls the token via `supabase.auth.getSession()`, attaches `Authorization: Bearer <token>`, redirects to `/login` on no session or a 401.
+- Wired it into the Documents page: both `POST /documents` and `POST /kb/upload` now go through `authedFetch()`. Tested live against deployed Render — real login, real upload, confirmed header in Network tab, real 200s back.
+- Confirmed Bot Settings — Save is Supabase-direct (preflight 200 + a 204 on the PATCH). No FastAPI call, left as-is.
+- Went looking for the Embed Script page's mystery `onrender.com` call from Mahi's original Week 4 message — page didn't exist in the dashboard yet at that point. Flagged, held off closing Thursday until sorted.
+- Flagged a real timing gap before touching it: the tenant-linking/signup call fires before email confirmation, so no session exists at that point — parked per Mahi's Friday scope rather than wiring auth onto it blind.
+
+## Fri
+- Pulled Mahi's `auth-context.tsx` / `dashboard/layout.tsx` / `pending/page.tsx` — confirmed the pending-status design (live `users.status` read + 15s polling via `refetchUserInfo()`, not a login-response field) was real and already built, not just described.
+- Found and fixed two bugs in `dashboard/layout.tsx`: a redundant second Supabase query for `status` that duplicated what `useAuth()` already provided (risked disagreeing with the context's value), and a dropped loading guard that would've flashed dashboard content before a pending/inactive user got redirected.
+- Built `app/dashboard/member/page.tsx` — the landing route non-owners get sent to on approval, previously referenced by `pending/page.tsx` but never built (would've 404'd on a real approval).
+- Ran a real owner signup end-to-end for the first time since Thursday's auth changes landed, and found three real, previously-invisible bugs in `login/page.tsx`:
+  1. **404** — reading `NEXT_PUBLIC_BACKEND_URL`, which was never actually set; only `NEXT_PUBLIC_API_URL` (used everywhere else) existed. Fixed by standardizing on one var name.
+  2. **422** — frontend spread camelCase signup fields (`companyName`, `typeOfBusiness`, ...) straight into `/tenants`, but the backend's Pydantic model expects snake_case. Fixed with explicit field mapping instead of a blind spread.
+  3. **False "stuck on pending" for ~10s** — `AuthProvider`'s context wasn't refetched after `/tenants` succeeded, so `dashboard/layout.tsx` briefly read stale (`null`) status until the next 15s poll caught up for real. Fixed by calling `refetchUserInfo()` before routing to `/dashboard`.
+- Confirmed with Mahi: no DB trigger links `invite_token` to a real `users` row — `login/page.tsx`'s `/invite/accept` call on first login is the actual (and only) linking mechanism.
+- Flagged the declined-user-relogin gap: `decline-user` hard-deletes the `public.users` row but leaves the Supabase auth account + `invite_token` metadata intact, so a declined person could silently re-trigger `/invite/accept` and land back in the pending queue with no indication they were ever rejected.
+
+## Sat
+- Built the Admin > Invites UI: pending-requests list (`GET /admin/pending-users`) and Accept/Decline buttons (`POST /admin/approve-user` / `decline-user`), wired through `authedFetch()`.
+- Added the `Invites` nav link in `dashboard/layout.tsx`, owner-gated alongside Embed Script.
+- Found and fixed two real hook-call bugs while building this: a duplicate `loading` variable in the Invites page colliding between `useAuth()`'s value and local state (produced a confusing "Invalid hook call" error masking a plain naming collision), and a hooks-called-inside-a-non-component bug in the Embed page's `generateEmbedSnippets` helper (hooks were firing conditionally depending on an early return, violating React's hook-order rule).
+- Added role guards directly inside both the Embed and Invites pages (not just hiding the nav link), so a member hitting either URL directly gets redirected to `/dashboard/member` instead of a broken/empty page.
+- Added the invite-link generator to the Invites page: fetches the tenant's real `invite_token` from Supabase, builds the shareable `/signup?invite=...` URL off `window.location.origin` (no hardcoded domain), with a copy button.
+- Fixed the double-click race condition on Accept/Decline: a second rapid click's request now correctly treats a `404` (row no longer matches `status='pending'`, per the backend's own `WHERE` clause) as "already resolved," not an error.
+- Confirmed why Embed Script and Invites are owner-only by design, per the original blueprint's roles table — not an oversight.
+
+## Sun
+- Diagnosed and resolved a dashboard stuck on "Loading..." after login — traced through: RLS confirmed fine via a direct curl check (real row returned correctly), narrowing it to a stale deployment / frontend logic issue rather than a backend/policy problem.
+- Diagnosed the `/chat` 403 (`"Origin not authorized for this tenant"`) — not a bug: the test tenant's `website_domain` didn't match the actual embed-test domain (`https://mahi-bhumika.github.io`). Updated the value, confirmed `/chat` working end-to-end from the real embedded widget.
+- Tested `/invite/accept` — the full invited-member signup path — end to end for the first time.
+- Tested the declined-user-relogin edge case flagged Friday — confirmed working correctly.
+- Full pipeline check completed: signup (owner + invited member), pending/active status switching, Accept/Decline, invite link generation and reuse, `/chat` from a real embedded widget, all confirmed working.
+
+---
+
+## Where things stand heading into next week
+- Full auth + RLS + invite lifecycle working end-to-end: owner signup → tenant creation → dashboard access; invite link → member signup → pending screen → owner approval/decline → correct routing either way.
+- Both attack-script paths (Supabase-direct, FastAPI) validated against real RLS policies, with the `end_users` gap caught and closed.
+- Real production-blocking bugs (env var mismatch, field-name mismatch, stale auth context) found only because the actual signup path was run end-to-end for the first time post-auth-wiring — not caught by isolated testing of individual pieces.
+- `/chat` Origin-check confirmed working correctly from a real deployed widget, not just curl.
+- Two genuine hook-call bugs fixed (duplicate variable naming, hooks called outside a proper component) — worth remembering as a pattern to watch for anywhere else a role/status guard gets copy-pasted.

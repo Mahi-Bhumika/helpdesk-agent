@@ -15,12 +15,27 @@ type Doc = {
     created_at: string;
 };
 
+const CATEGORY_OPTIONS = [
+    { value: "faq", label: "FAQ" },
+    { value: "manuals", label: "Manuals" },
+    { value: "refund_policy", label: "Refund / Return Policy" },
+    { value: "tos_privacy", label: "ToS / Privacy" },
+    { value: "pricing", label: "Pricing Sheets" },
+    { value: "onboarding", label: "Onboarding Guides" },
+    { value: "kb_export", label: "KB Exports" },
+] as const;
+
+function categoryLabel(value: string | null) {
+    return CATEGORY_OPTIONS.find((opt) => opt.value === value)?.label ?? value ?? "—";
+}
+
 export default function DocumentsPage() {
     const { tenantId } = useAuth();
     const [theme, setTheme] = useState("");
     const [status, setStatus] = useState<"idle" | "uploading" | "success" | "error">("idle");
     const [docs, setDocs] = useState<Doc[]>([]);
     const [loadingDocs, setLoadingDocs] = useState(true);
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
@@ -42,10 +57,12 @@ export default function DocumentsPage() {
     const { getRootProps, getInputProps } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
         disabled: !theme.trim(), // can't drop a file until a category is entered
+        
         onDrop: async (files) => {
             const file = files[0];
             if (!file || !tenantId || !theme.trim()) return;
             setStatus("uploading");
+            setErrorMessage(null);
 
             try {
                 const createRes = await authedFetch("/documents", {
@@ -70,13 +87,25 @@ export default function DocumentsPage() {
                     method: "POST",
                     body: formData,
                 });
-                if (!uploadRes.ok) throw new Error("Failed to upload file");
+                if (!uploadRes.ok) {
+                    let message = "Upload failed. Please try again.";
+                    if (uploadRes.status === 400 || uploadRes.status === 422) {
+                        try {
+                            const errBody = await uploadRes.json();
+                            message = errBody.detail ?? errBody.message ?? message;
+                        } catch {
+                            // response wasn't JSON — fall back to the generic message
+                        }
+                    }
+                    throw new Error(message);
+                }
 
                 setStatus("success");
                 setTheme(""); // reset for the next upload
                 await fetchDocs();
-            } catch {
+            } catch (err) {
                 setStatus("error");
+                setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
             }
         },
     });
@@ -85,17 +114,37 @@ export default function DocumentsPage() {
         return <div>Loading your account...</div>;
     }
 
-    return (
+   return (
+    <>
+        {errorMessage && (
+            <div className="fixed bottom-4 right-4 max-w-sm rounded-md bg-red-600 text-white px-4 py-3 shadow-lg flex items-start gap-3">
+                <p className="text-sm">{errorMessage}</p>
+                <button
+                    onClick={() => setErrorMessage(null)}
+                    className="text-white/80 hover:text-white text-sm font-bold"
+                    aria-label="Dismiss"
+                >
+                    ×
+                </button>
+            </div>
+        )}
         <div>
             <h1 className="text-xl font-bold mb-4">Documents & FAQs</h1>
 
-            <input
-                type="text"
-                placeholder="Category (e.g. Billing, Onboarding, Technical)"
+            <select
                 value={theme}
                 onChange={(e) => setTheme(e.target.value)}
-                className="mb-4 w-full rounded-md border border-gray-300 px-3 py-2"
-            />
+                className="mb-4 w-full rounded-md border border-gray-300 px-3 py-2 bg-white text-gray-900"
+            >
+                <option value="" className="bg-white text-gray-900">
+                    Select a category…
+                </option>
+                {CATEGORY_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value} className="bg-white text-gray-900">
+                        {opt.label}
+                    </option>
+                ))}
+            </select>
 
             <div
                 {...getRootProps()}
@@ -134,7 +183,7 @@ export default function DocumentsPage() {
                             {docs.map((doc) => (
                                 <tr key={doc.document_id} className="border-b border-gray-800">
                                     <td className="py-2 pr-4">{doc.file_url ?? "Untitled"}</td>
-                                    <td className="py-2 pr-4">{doc.theme ?? "—"}</td>
+                                    <td className="py-2 pr-4">{categoryLabel(doc.theme)}</td>
                                     <td className="py-2 pr-4">{doc.status}</td>
                                     <td className="py-2 pr-4">
                                         {new Date(doc.created_at).toLocaleString()}
@@ -146,5 +195,7 @@ export default function DocumentsPage() {
                 )}
             </div>
         </div>
-    );
+    </>
+);
+
 }

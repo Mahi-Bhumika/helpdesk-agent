@@ -21,7 +21,7 @@ function generateEmbedSnippets(settings : EmbedSettings ) {
 
   const html = `<script
   src="${cdnUrl}"
-  data-name = "${name}"
+  data-name="${name}"
   data-tenant-id="${tenantId}"
   data-api-url="${apiUrl}"
   data-color="${color}"

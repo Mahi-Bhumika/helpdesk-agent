@@ -2,40 +2,64 @@
 (function () {
   "use strict";
 
+  function fetchLiveSettings(config) {
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () { controller.abort(); }, 3000); // don't hang the widget forever if the backend's slow/down
+
+  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-settings", {
+    method: "GET",
+    mode: "cors",
+    signal: controller.signal,
+  })
+    .then(function (res) {
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .finally(function () {
+      clearTimeout(timeoutId);
+    });
+}
+
   function init() {
-    var scriptTag =
-      document.currentScript ||
-      document.querySelector("script[data-tenant-id]");
+  var scriptTag = document.currentScript || document.querySelector("script[data-tenant-id]");
 
-    if (!scriptTag) {
-      console.error("[BotAI Widget] Could not locate its own <script> tag.");
-      return;
-    }
+  if (!scriptTag) {
+    console.error("[BotAI Widget] Could not locate its own <script> tag.");
+    return;
+  }
 
-    var config = {
-      tenantId: scriptTag.getAttribute("data-tenant-id"),
-      botName : scriptTag.getAttribute("data-name") || "Chat",
-      apiUrl: scriptTag.getAttribute("data-api-url") || "",
-      color: scriptTag.getAttribute("data-color") || "#5B5BF0",
-      position: scriptTag.getAttribute("data-position") || "bottom-right",
-      greeting:
-        scriptTag.getAttribute("data-greeting") ||
-        "Hi! How can I help you today?",
-    };
+  var config = {
+    tenantId: scriptTag.getAttribute("data-tenant-id"),
+    botName: scriptTag.getAttribute("data-name") || "Chat",
+    apiUrl: scriptTag.getAttribute("data-api-url") || "",
+    color: scriptTag.getAttribute("data-color") || "#5B5BF0",
+    position: scriptTag.getAttribute("data-position") || "bottom-right",
+    greeting: scriptTag.getAttribute("data-greeting") || "Hi! How can I help you today?",
+  };
 
-    if (!config.tenantId) {
-      console.error(
-        "[BotAI Widget] Missing required data-tenant-id attribute — widget not mounted."
-      );
-      return;
-    }
-    if (!config.apiUrl) {
-      console.error(
-        "[BotAI Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail."
-      );
-    }
+  if (!config.tenantId) {
+    console.error("[BotAI Widget] Missing required data-tenant-id attribute — widget not mounted.");
+    return;
+  }
+  if (!config.apiUrl) {
+    console.error("[BotAI Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail.");
+    mountWidget(config); // no apiUrl means no live-settings call is possible either — mount with embed-snippet defaults
+    return;
+  }
 
+  fetchLiveSettings(config)
+  .then(function (live) {
+    if (live && live.theme_color) config.color = live.theme_color;
+    if (live && live.greeting_message) config.greeting = live.greeting_message;
+    if (live && live.bot_name) config.botName = live.bot_name;   // ← add this
+  })
+  .catch(function (err) {
+    console.warn("[BotAI Widget] Could not fetch live settings, using embed snippet defaults.", err);
+  })
+  .finally(function () {
     mountWidget(config);
+  });
   }
 
   function mountWidget(config) {

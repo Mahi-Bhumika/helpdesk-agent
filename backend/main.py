@@ -111,6 +111,7 @@ async def update_document(
     return dict(result.fetchone()._mapping)
 
 
+
 # POST — create a new document
 class DocumentCreate(BaseModel):
     tenant_id: str
@@ -162,6 +163,27 @@ class TenantCreate(BaseModel):
     greeting_message: Optional[str] = None
     theme_color: Optional[str] = None
 
+@app.get("/tenants/{tenant_id}/widget-config")
+async def get_widget_config(tenant_id: str, db: AsyncSession = Depends(get_db)):
+    enforce_chat_rate_limit(f"widget-config:{tenant_id}", max_requests=60, window_seconds=60.0)
+
+    result = await db.execute(
+        text("""
+            SELECT bot_name, greeting_message, theme_color
+            FROM tenants
+            WHERE tenant_id = :tenant_id
+        """),
+        {"tenant_id": tenant_id},
+    )
+    tenant = result.fetchone()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    return {
+        "bot_name": tenant.bot_name,
+        "greeting_message": tenant.greeting_message,
+        "theme_color": tenant.theme_color,
+    }
 
 @app.post("/tenants")
 async def create_tenant(
@@ -194,6 +216,8 @@ async def create_tenant(
     await db.commit()
     return dict(new_tenant._mapping)
 
+MAX_CHUNKS_PER_UPLOAD = 65
+
 
 @app.post("/kb/upload")
 async def upload_document(
@@ -221,6 +245,32 @@ async def upload_document(
         chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
         print(f"chunk_text took {time.time() - t1:.2f}s")
 
+        t1 = time.time()
+        chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
+        print(f"chunk_text took {time.time() - t1:.2f}s")
+
+        if len(chunks) > MAX_CHUNKS_PER_UPLOAD:
+            await db.execute(
+                text("""
+                    UPDATE documents
+                    SET status = 'failed'
+                    WHERE document_id = :document_id
+                """),
+                {"document_id": document_id},
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"This document produced {len(chunks)} chunks, which exceeds the "
+                    f"{MAX_CHUNKS_PER_UPLOAD}-chunk limit per upload. Try splitting it into "
+                    f"smaller documents and uploading each separately."
+                ),
+            )
+
+        t2 = time.time()
+        embeddings = await asyncio.to_thread(embed_chunks, chunks)
+        print(f"embed_chunks took {time.time() - t2:.2f}s")
         t2 = time.time()
         embeddings = await asyncio.to_thread(embed_chunks, chunks)
         print(f"embed_chunks took {time.time() - t2:.2f}s")

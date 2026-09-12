@@ -112,7 +112,44 @@ export default function InvitesAdminPage() {
 
     return (
         <div>
-            <h1 className="text-xl font-bold mb-4">Pending Invites</h1>
+            <h1 className="text-xl font-bold mb-4">Invites</h1>
+
+            {/* Invite link section */}
+            <div className="mb-8 rounded-md border border-gray-700 bg-gray-900 p-4">
+                <h2 className="text-sm font-semibold text-gray-300 mb-2">
+                    Team invite link
+                </h2>
+                {inviteLoading ? (
+                    <p className="text-sm text-gray-500">Loading link...</p>
+                ) : inviteUrl ? (
+                    <div className="flex items-center gap-2">
+                        <input
+                            type="text"
+                            readOnly
+                            value={inviteUrl}
+                            onClick={(e) => e.currentTarget.select()}
+                            className="flex-1 rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-300"
+                        />
+                        <button
+                            onClick={handleCopy}
+                            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 whitespace-nowrap"
+                        >
+                            {copied ? "Copied ✓" : "Copy"}
+                        </button>
+                    </div>
+                ) : (
+                    <p className="text-sm text-red-500">
+                        No invite token found for this tenant.
+                    </p>
+                )}
+                <p className="mt-2 text-xs text-gray-500">
+                    Anyone with this link can request to join your team. They&apos;ll
+                    show up below once they sign up, waiting on your approval.
+                </p>
+            </div>
+
+            {/* Pending requests */}
+            <h2 className="text-lg font-semibold mb-2">Pending requests</h2>
 
             {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
 
@@ -132,7 +169,7 @@ export default function InvitesAdminPage() {
                             <tr key={u.user_id} className="border-b border-gray-800">
                                 <td className="py-2 pr-4">{u.email}</td>
                                 <td className="py-2 pr-4">
-                                    {u.invited_at ? new Date(u.invited_at).toLocaleString() : "—"}
+                                    {new Date(u.invited_at ?? u.created_at).toLocaleString()}
                                 </td>
                                 <td className="py-2 pr-4 flex gap-2">
                                     <button

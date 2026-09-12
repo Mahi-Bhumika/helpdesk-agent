@@ -659,3 +659,79 @@ async def decline_user(
         raise HTTPException(status_code=404, detail="No matching pending user found for your tenant")
 
     return dict(row._mapping)
+
+@app.get("/sessions")
+async def list_sessions(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        text("""
+            SELECT
+                cs.session_id,
+                cs.start_datetime,
+                cs.end_datetime,
+                cs.customer_satisfaction,
+                COUNT(m.message_id) AS message_count
+            FROM chat_sessions cs
+            LEFT JOIN messages m ON m.session_id = cs.session_id
+            WHERE cs.tenant_id = :tenant_id
+            GROUP BY cs.session_id
+            ORDER BY cs.start_datetime DESC
+            LIMIT 100
+        """),
+        {"tenant_id": current_user["tenant_id"]},
+    )
+    rows = result.fetchall()
+    return [dict(row._mapping) for row in rows]
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Verify the session belongs to this tenant before returning anything
+    session_check = await db.execute(
+        text("SELECT tenant_id FROM chat_sessions WHERE session_id = :session_id"),
+        {"session_id": session_id},
+    )
+    session_row = session_check.fetchone()
+    if session_row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if str(session_row.tenant_id) != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Session does not belong to your tenant")
+
+    messages_result = await db.execute(
+        text("""
+            SELECT message_id, sender, content, sentiment, response_latency_ms, created_at
+            FROM messages
+            WHERE session_id = :session_id
+            ORDER BY created_at ASC
+        """),
+        {"session_id": session_id},
+    )
+    messages = [dict(row._mapping) for row in messages_result.fetchall()]
+
+    sources_result = await db.execute(
+        text("""
+            SELECT ms.message_id, dc.chunk_text, dc.chunk_index, ms.relevance_score
+            FROM message_sources ms
+            JOIN document_chunks dc ON dc.chunk_id = ms.chunk_id
+            WHERE ms.message_id = ANY(:message_ids)
+            ORDER BY ms.relevance_score DESC
+        """),
+        {"message_ids": [m["message_id"] for m in messages]},
+    )
+    sources_by_message: dict = {}
+    for row in sources_result.fetchall():
+        sources_by_message.setdefault(str(row.message_id), []).append({
+            "chunk_text": row.chunk_text,
+            "chunk_index": row.chunk_index,
+            "relevance_score": row.relevance_score,
+        })
+
+    for m in messages:
+        m["sources"] = sources_by_message.get(str(m["message_id"]), [])
+
+    return messages

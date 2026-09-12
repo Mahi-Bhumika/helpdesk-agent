@@ -842,3 +842,80 @@ reach.
 - Real production-blocking bugs (env var mismatch, field-name mismatch, stale auth context) found only because the actual signup path was run end-to-end for the first time post-auth-wiring — not caught by isolated testing of individual pieces.
 - `/chat` Origin-check confirmed working correctly from a real deployed widget, not just curl.
 - Two genuine hook-call bugs fixed (duplicate variable naming, hooks called outside a proper component) — worth remembering as a pattern to watch for anywhere else a role/status guard gets copy-pasted.
+
+# Helpdesk Agent — Week 5 Learning Log (Mahi)
+
+*Prompt tuning, upload guardrails, widget-config endpoint, session logging — Tue through Sun*
+
+
+## Day 1 (Tue) — Prompt tuning: greetings and answer length
+
+- Built `is_smalltalk()` — a regex-based short-circuit that detects greeting-only messages ("hi", "hello", "hey there!") before any retrieval happens
+- **Deliberate choice**: used a regex, not an LLM call, to classify greetings — the distinction is obvious and cheap to catch with a pattern match; spending an API round-trip to ask a model "is this a greeting?" would be wasteful for something this unambiguous
+- Branched `/chat` early: small talk skips embedding + pgvector search entirely, gets a short friendly reply from a separate lightweight prompt, still gets logged into `messages` (for accurate session/analytics history) but skips `message_sources` (`sources: []`, since there's nothing to cite)
+- Rewrote the main system prompt: capped real answers at 2-4 sentences, banned headers/bullet lists by default, softened the "don't know" fallback to suggest contacting support instead of a flat refusal
+- **Correction made mid-build**: a hard "2-4 sentences" cap would have truncated genuine step-by-step answers ("how do I reset my password"). Added an explicit exception clause letting the model use a short numbered list *only* when the question genuinely asks for a process — handled via prompt wording, not a second regex classifier, since "is this a process question" is far fuzzier than "is this a greeting" and doesn't suit a keyword rule
+- **Live-tested, found a real gap late in the week**: a real test conversation ("what earbuds do you have?") got a complete, correctly-short answer, but the visitor followed up with "thats it?" — not because the answer was wrong or incomplete, but because it gave no signal there was more to ask about (pricing, colors, etc.). Diagnosed as a "doesn't invite continuation" problem, not a "too short" problem, and scoped a follow-up prompt addition (briefly inviting further questions when more context exists) rather than reversing the length cap
+
+## Day 2 (Wed) — Upload guardrails
+
+- Added `MAX_CHUNKS_PER_UPLOAD = 65` and a check in `/kb/upload`, placed deliberately **after** `chunk_text()` (only point where real chunk count is known) and **before** `embed_chunks()` (the expensive step worth avoiding on a doc that's about to be rejected)
+- Rejection returns `422` (content-level validation failure, not a malformed request) with a message describing the actual chunk count and the limit
+- **Real gap caught before shipping, not after**: a rejected upload would otherwise leave its `documents` row stuck at `status='uploading'` forever, indistinguishable from "still processing" — added an explicit `UPDATE documents SET status = 'failed'` before the rejection, committed before the `raise` (since raising `HTTPException` unwinds the function immediately, code after it never runs)
+- Verified the `theme` field on `POST /documents` — turned out to already exist end-to-end (`DocumentCreate` model, INSERT, response) from earlier work; no new code needed. Decided against a DB-level `CHECK` constraint on `theme` values, since the frontend dropdown (FAQ, manuals, pricing, etc.) is judged sufficient guardrail for this week's actual scope, unlike `users.role` in Week 2 where a DB-level constraint was worth the extra step
+
+## Day 3 (Thu) — Public widget-config endpoint
+
+- Built `GET /tenants/{tenant_id}/widget-config` — returns `bot_name`, `greeting_message`, `theme_color` so the widget can fetch current settings at load time instead of baking them into the embed snippet at generation time
+- **Deliberate exception to the project's usual auth pattern**: this route has no `get_current_user` dependency — the caller is an anonymous visitor's browser on the tenant's own site, with no session to authenticate. Weighed the actual sensitivity of the data (a name, a greeting sentence, a hex color — all already visible in the rendered widget anyway) against the cost of blocking on a misconfigured `website_domain`, and judged an Origin check unnecessary here, unlike `/chat` where real LLM cost and real document content are at stake
+- Added rate limiting anyway, as hygiene rather than security — reused the existing `enforce_chat_rate_limit()` helper, but with a **separate key** (`f"widget-config:{tenant_id}"`) and a looser limit (60/60s vs the default 30/60s), since the existing function's bucket is keyed on a raw string with no awareness of what it's protecting. Using the same key as `/chat` would have let normal multi-page browsing quietly eat into a visitor's real chat quota before they'd asked a single question
+
+## Day 4 (Fri) — Analytics: less new work than planned
+
+- Checked what the existing Analytics page actually queries: total sessions and total messages, both simple Supabase `count` queries in the Week 3 pattern — no backend aggregation work needed for what exists today
+- Deferred the open "does this project need seeded dummy data" question rather than build backend aggregation work against an unresolved premise
+
+## Day 5 (Sat) — Response latency + Sessions endpoints
+
+- Discovered `messages.response_latency_ms` already existed in the schema from Week 1 design work but had never actually been populated — wired real timing into both `/chat` paths (small-talk and main), starting the clock after rate-limit/origin checks (gatekeeping isn't "response work") and stopping it right before each bot-message insert
+- Built `GET /sessions` — tenant-scoped list (via `current_user["tenant_id"]`, never a client-supplied value, per the Week 4 rule), with a `LEFT JOIN`+`COUNT` to get per-session message counts in one query instead of triggering N+1 queries from the frontend
+- **Deliberately capped at `LIMIT 100`, no pagination** — flagged explicitly as a real gap rather than something quietly skipped, since a tenant with thousands of sessions will eventually need it
+- Built `GET /sessions/{session_id}/messages` — full transcript with cited chunks. Verifies the session belongs to the caller's tenant *before* returning anything, raising a real `403` on mismatch rather than silently returning an empty list (same "reject on mismatch, don't mask" principle as Week 4's auth retrofit)
+- **Design choice**: fetched messages and sources as two separate queries, then stitched them together in Python, rather than one large join — a single join would have duplicated each message row once per cited chunk, needing to be un-flattened anyway
+- Confirmed a real, intentional asymmetry: only bot messages ever get `sources` populated (user messages always show `sources: []`), since `message_sources` was only ever designed to record what the *bot* cited
+
+## Day 6 (Sun) — Regression pass + handoff
+
+- Ran a structured regression check across all of Tuesday–Saturday's changes in one sitting, rather than trusting each piece in isolation — organized by feature (prompt tuning, chunk guard, widget-config, latency, sessions) with explicit pass/fail criteria for each, including the one check judged most important: hammering the widget-config endpoint's rate limit and confirming it does *not* also burn down the separate `/chat` limit
+- Confirmed the Declined-page backend routing was already fully shipped in Week 4 — this week's Sunday item was pure regression testing, not new work, once verified directly rather than assumed from the original plan's wording
+- Wrote and shared a handoff doc for the frontend side (`BACKEND_HANDOFF_bhumika_fri-sun.md`) — explicit response shapes for `/sessions` and `/sessions/{id}/messages`, plus called-out gotchas (bot-only `sources`, `null` `sentiment`/`customer_satisfaction` fields, no pagination yet) so the frontend build doesn't have to reverse-engineer behavior from trial and error
+
+---
+
+## Bugs and gaps found this week
+
+1. **A rejected upload would silently strand a `documents` row at `status='uploading'` forever** — caught during design, before it ever shipped, by asking "what does the rest of the system see when this happens?" rather than just returning an error to the caller and moving on.
+2. **Reusing `/chat`'s rate-limit function unmodified for widget-config would have shared its quota** — caught by actually reading `rate_limit.py`'s implementation (keyed on a raw string) instead of assuming "rate limit" meant "safe to reuse anywhere."
+3. **The Friday Analytics-aggregation task didn't need to exist** — the actual current Analytics page only needed simple counts already covered by an existing pattern; building speculative aggregation backend against an unconfirmed need would have been wasted work.
+4. **A real UX gap, not a code bug**: short, correct, complete answers can still read as unsatisfying to a user if they don't signal there's more available — a lesson that "shorter is better" and "shorter is complete-feeling" are two different design goals that don't automatically move together.
+
+---
+
+## Decisions made deliberately this week
+
+- **Regex for greeting detection, prompt wording for process-question detection** — matched the detection method to how ambiguous the actual distinction is, rather than using one tool (a classifier, or a keyword list) for both.
+- **No auth on the widget-config endpoint, but yes to rate limiting** — separated "is this data sensitive" (no) from "should this be abuse-proof" (yes, cheaply), rather than treating "needs protection" as a single yes/no decision.
+- **No DB-level CHECK constraint on `documents.theme`** — judged the frontend dropdown sufficient for this week's actual risk, a lighter bar than the `users.role` constraint from Week 2, made consciously rather than by default.
+- **Capped `/sessions` at 100 with no pagination, flagged rather than hidden** — chose to ship a known, bounded gap with a clear note over either blocking the whole feature on building pagination now, or shipping it silently and letting it surface as a confusing bug later.
+
+---
+
+## Where things stand heading into next steps
+
+- `/chat` now handles greetings naturally, keeps real answers short without truncating genuine step-by-step instructions, and is about to get a small addition to invite follow-up questions when relevant
+- `/kb/upload` has a real, tested ceiling with proper status cleanup on rejection
+- The widget can now fetch live `bot_name`/`greeting_message`/`theme_color` without needing the embed snippet regenerated — unblocks Bhumika's Thursday frontend piece
+- `response_latency_ms` is now real, populated data going forward (historical messages before this week remain `null`)
+- `GET /sessions` and `GET /sessions/{id}/messages` are live, tenant-scoped, and tested against the cross-tenant case that mattered most given Week 4's theme
+- Handoff doc shared so Bhumika's Friday–Sunday frontend work (Sessions page, Analytics wiring, Declined page) can proceed against real, documented backend behavior rather than guesswork
+- Still open: pagination on `/sessions`, the dummy-data decision for Analytics, and finishing the "invite follow-up" prompt addition based on live testing feedback

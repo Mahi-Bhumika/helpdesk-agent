@@ -451,6 +451,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         "naturally just one or two sentences. "
         "If the answer isn't in the context, say briefly that you don't have that information "
         "and suggest they contact support directly. Do not make up information beyond what's given."
+        "After answering, if there's likely more relevant detail in the context "
+        "(pricing, specs, related items), briefly invite the user to ask — e.g. "
+        "'Want to know about pricing or colors?' Skip this if the answer is already complete."
     )
     user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
 

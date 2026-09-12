@@ -355,7 +355,10 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
 
     # Small-talk short-circuit: skip retrieval for greetings
+    
+            # Small-talk short-circuit: skip retrieval for greetings
     if is_smalltalk(query.question):
+        t_start = time.time()
         session_id = query.session_id
         if session_id is None:
             session_result = await db.execute(
@@ -389,19 +392,20 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
             """),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
         )
+        latency_ms = int((time.time() - t_start) * 1000)
         await db.execute(
             text("""
-                INSERT INTO messages (session_id, tenant_id, sender, content)
-                VALUES (:session_id, :tenant_id, 'bot', :content)
+                INSERT INTO messages (session_id, tenant_id, sender, content, response_latency_ms)
+                VALUES (:session_id, :tenant_id, 'bot', :content, :latency_ms)
             """),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer, "latency_ms": latency_ms},
         )
         await db.commit()
 
         return ChatResponse(session_id=str(session_id), answer=answer, sources=[])
 
-    # Step 1: create a session if this is the first message
-    session_id = query.session_ids
+
+    
     # ...rest unchanged
     # Step 1: create a session if this is the first message
     session_id = query.session_id

@@ -1,13 +1,50 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useAuth } from "@/lib/auth-context";
+import { supabase } from "@/lib/supabase";
 import Link from "next/link";
 
-export default function dashboard(){
+export default function DashboardHome() {
+    const { tenantId } = useAuth();
+    const [websiteDomain, setWebsiteDomain] = useState<string | null>(null);
+
+    useEffect(() => {
+        async function fetchDomain() {
+            if (!tenantId) return;
+            const { data } = await supabase
+                .from("tenants")
+                .select("website_domain")
+                .eq("tenant_id", tenantId)
+                .single();
+            setWebsiteDomain(data?.website_domain ?? null);
+        }
+        fetchDomain();
+    }, [tenantId]);
+
     return (
-        <main className = "flex min-h-screen flex-col items-center justify-center gap-8 p-8">
-      <h1 className = "text-3xl font-bold"> Helpdesk Agent </h1>
-      <p className = "text-gray-600 text-center max-w-md">
-        AI-powered customer support chatbot platform for commercial-grade usage. B2B business -
-        Upload your docs, embed the widget, and let it answer your customers&apos; questions.
-      </p>
-    </main> 
-  );
+        <div>
+            <h1 className="text-xl font-bold mb-4">Dashboard</h1>
+
+            <div className="flex flex-wrap gap-3 mb-6">
+                <Link href="/dashboard/sessions" className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900">
+                    View chat sessions →
+                </Link>
+                <Link href="/dashboard/analytics" className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900">
+                    View analytics →
+                </Link>
+                {websiteDomain && (
+                <a
+                href={websiteDomain.startsWith("http") ? websiteDomain : `https://${websiteDomain}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900"
+                >
+                Try your bot on your site ↗
+                </a>
+            )}
+            </div>
+            {/* rest of your existing dashboard home content, if any */}
+        </div>
+    );
 }

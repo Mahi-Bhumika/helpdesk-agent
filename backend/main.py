@@ -253,6 +253,24 @@ async def upload_document(
     }
 
 
+import re
+
+_GREETING_PATTERNS = re.compile(
+    r"^\s*(hi|hii+|hey|hello|yo|sup|good\s?(morning|afternoon|evening)|howdy|hola)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def is_smalltalk(question: str) -> bool:
+    """
+    Detects short greeting-only messages so we can skip retrieval
+    and answer naturally instead of dumping document context.
+    """
+    q = question.strip()
+    if len(q) > 25:
+        return False
+    return bool(_GREETING_PATTERNS.match(q))
+
+
 
 class ChatQuery(BaseModel):
     tenant_id: str
@@ -286,6 +304,54 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     if not origin or tenant.website_domain not in origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
 
+    # Small-talk short-circuit: skip retrieval for greetings
+    if is_smalltalk(query.question):
+        session_id = query.session_id
+        if session_id is None:
+            session_result = await db.execute(
+                text("""
+                    INSERT INTO chat_sessions (tenant_id)
+                    VALUES (:tenant_id)
+                    RETURNING session_id
+                """),
+                {"tenant_id": query.tenant_id},
+            )
+            session_id = str(session_result.fetchone().session_id)
+
+        smalltalk_completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {"role": "system", "content": (
+                    "You are a friendly assistant for a company's support widget. "
+                    "The visitor just sent a greeting, not a real question. "
+                    "Reply with a brief, warm greeting back (1 sentence) and invite them "
+                    "to ask their question. Do not mention documents or context."
+                )},
+                {"role": "user", "content": query.question},
+            ],
+        )
+        answer = smalltalk_completion.choices[0].message.content
+
+        await db.execute(
+            text("""
+                INSERT INTO messages (session_id, tenant_id, sender, content)
+                VALUES (:session_id, :tenant_id, 'user', :content)
+            """),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+        )
+        await db.execute(
+            text("""
+                INSERT INTO messages (session_id, tenant_id, sender, content)
+                VALUES (:session_id, :tenant_id, 'bot', :content)
+            """),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
+        )
+        await db.commit()
+
+        return ChatResponse(session_id=str(session_id), answer=answer, sources=[])
+
+    # Step 1: create a session if this is the first message
+    session_id = query.session_ids
     # ...rest unchanged
     # Step 1: create a session if this is the first message
     session_id = query.session_id
@@ -322,9 +388,15 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks)
 
     system_prompt = (
-        "You are a helpful assistant answering questions based only on the provided context. "
-        "If the answer isn't in the context, say you don't have that information. "
-        "Do not make up information beyond what's given."
+        "You are a helpful, friendly support assistant answering questions based only on the "
+        "provided context. Default to 2-4 short sentences, plain conversational language, no "
+        "headers or bullet lists. "
+        "Exception: if the question genuinely asks for a process, steps, or how to do something "
+        "(e.g. 'how do I reset my password'), you may use a short numbered list instead — but "
+        "keep each step to one short line, and skip the numbered list entirely if the answer is "
+        "naturally just one or two sentences. "
+        "If the answer isn't in the context, say briefly that you don't have that information "
+        "and suggest they contact support directly. Do not make up information beyond what's given."
     )
     user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
 

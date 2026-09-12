@@ -6,7 +6,7 @@
   var controller = new AbortController();
   var timeoutId = setTimeout(function () { controller.abort(); }, 3000); // don't hang the widget forever if the backend's slow/down
 
-  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/bot-settings", {
+  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
     method: "GET",
     mode: "cors",
     signal: controller.signal,

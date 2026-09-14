@@ -919,3 +919,55 @@ reach.
 - `GET /sessions` and `GET /sessions/{id}/messages` are live, tenant-scoped, and tested against the cross-tenant case that mattered most given Week 4's theme
 - Handoff doc shared so Bhumika's Friday–Sunday frontend work (Sessions page, Analytics wiring, Declined page) can proceed against real, documented backend behavior rather than guesswork
 - Still open: pagination on `/sessions`, the dummy-data decision for Analytics, and finishing the "invite follow-up" prompt addition based on live testing feedback
+
+# Week 5 — Learning Log (Bhumika)
+
+## TL;DR
+Went from a widget that silently froze its own bubble color/greeting the moment it was pasted onto a site, to one that actually checks in with the backend on every load. Built out the whole Sessions/Analytics/Declined trio from scratch against Mahi's finished endpoints — zero contract negotiation needed this time, which was a nice change from every other week. Closed the loop on a Week-4 leftover (the Accept/Decline double-click race) with an actual concurrent test instead of a "probably fine." Also personally re-learned the same JSX lesson twice in one day, which is its own kind of data point.
+
+## What got built this week
+
+- **Autoscroll fix** — `appendMessage`/`appendTyping` were scrolling `.botai-messages` (no height constraint, nothing to scroll within), not `.botai-panel-body` (the real `overflow-y:auto` container). Fixed to target the right element, switched to `scrollTo({ behavior: "smooth" })`.
+- **Category dropdown** on Documents upload — 7 fixed options, sent as `theme` on both `/documents` and `/kb/upload`. Found and fixed a genuine white-on-white contrast bug on the native `<select>` options (inherits page theme by default; had to force `bg-white text-gray-900` on both the select and every option).
+- **Chunk-limit error toast** — reads `errBody.detail` off a 400/422 from `/kb/upload`, replacing a silent generic failure.
+- **Live widget settings** — `fetchLiveSettings()` added to `widget.js`; `init()` restructured to fetch-then-mount instead of mount-immediately, so `theme_color`/`greeting_message`/`bot_name` come from the backend on every page load, with the embed snippet's static `data-*` attributes as the fallback if the fetch fails or times out.
+- **Sessions list + transcript drill-down** — `app/dashboard/sessions/page.tsx` and `app/dashboard/sessions/[sessionId]/page.tsx`, built directly against Mahi's `GET /sessions` and `GET /sessions/{id}/messages` contracts.
+- **Analytics page** — real tenant-scoped counts (sessions, messages, avg response latency) via direct Supabase queries, no placeholder/zero states left in.
+- **Declined page** — `app/declined/page.tsx`, plus verified the routing logic in `auth-context.tsx` actually redirects a declined user here (not just assumed it would).
+- **Two real UI bugs found and fixed on Documents page**: the upload dropzone's `disabled` check only looked at whether a category was selected, never at `status === "uploading"` — meaning a second file could be dropped mid-upload the whole time. Same gap existed in the cursor/opacity styling. Fixed both to also check upload-in-progress state.
+
+## Concepts learned (the real list)
+
+- **`<script src="...">` is a pointer, not a paste.** The static tenant HTML never changes, but every page load re-fetches whatever's currently living at that URL — so redeploying `widget.js` updates every tenant site using the snippet, with zero action from the tenant, because they never had a copy of the code, just an address. Same mechanism as an `<img src>` tag pointing at a photo that gets swapped server-side.
+- **Native `<select>` popups are OS-rendered, not page-rendered** — they don't inherit your page's dark theme the way the closed control does, which is exactly why "white text, white background" is such a common invisible bug on dark-themed sites.
+- **A missing `<a` before `href={...}` produces a wall of unrelated-looking TypeScript errors** (ReactNode type mismatch, unexpected token, mismatched closing tags) — none of those are separate bugs, they're all downstream fallout from the one real missing tag. Worth scanning for the actual root cause before trying to fix each error individually.
+- **A button with no explicit `type` inside a `<form>` defaults to `type="submit"`** — so an `onClick` handler on an untyped button can silently double-fire the form's own `onSubmit` at the same time. `type="button"` is the fix, and it's easy to miss because nothing looks wrong until two saves fire from one click.
+- **Cancelled ≠ failed.** A fetch showing `(cancelled)` in the Network tab isn't necessarily a backend or CORS problem — if it's your own `AbortController` timing out, it means the backend genuinely didn't respond in time, which on Render's free tier is very often just a cold start. Testing the same endpoint again seconds later (after the first attempt already woke the instance) can legitimately return a clean 200 — not a contradiction, just the instance no longer asleep.
+- **Atomic SQL beats explicit locking, most of the time.** Mahi's Accept/Decline endpoints don't check-then-write in two steps — the `WHERE status = 'pending'` clause is baked directly into the same `UPDATE`. Under a real concurrent test, one request always wins cleanly (`200`) and the other gets a real, correct rejection (`404`), with no ambiguous in-between state — proven both directions (approve-first and decline-first), not just assumed from reading the code.
+
+## Real bugs found and fixed
+
+1. **Autoscroll targeting the wrong element** — `.botai-messages` has no scroll container of its own; `.botai-panel-body` does.
+2. **Dropdown option contrast** — unstyled `<option>` elements inherit the page's dark theme on the closed control but not the OS-rendered popup, producing white-on-white.
+3. **Documents dropzone not actually blocking a second upload mid-flight** — `disabled` and the visual styling both only checked category selection, never upload-in-progress state.
+4. **Missing `<a` opening tag** on the dashboard's "Try your bot on your site" link — twice in one sitting, same exact mistake both times, which was its own lesson in double-checking a paste actually landed instead of assuming it did.
+5. **Wrong endpoint path guessed twice** for live widget settings (`widget-settings`, then a second wrong guess) before getting the real path (`widget-config`) directly from Mahi — cost real time that a two-line message upfront would've saved.
+
+## Bugs found, flagged, not mine to fix
+
+- **`/kb/upload`'s chunk-count guard likely runs after full parse/chunk, not before** — a large test file 502'd with zero chunk-limit message, meaning the guard (if it exists on that path) never got a chance to respond before the request died. Flagged to Mahi; her call whether it needs restructuring to estimate cheaply upfront instead.
+- **Bot Settings form**: an untyped `<button onClick={handleSaveWebsiteDomain}>` inside the same `<form>` as the main settings save was silently triggering both saves from one click, and the website-domain save button has no busy/disabled state at all. Both handed to Mahi since it's her file.
+
+## The debugging saga worth remembering
+
+The `widget-config` request showing "cancelled," then immediately after showing a clean `200` when hit directly — looked like a flat contradiction in the moment. It wasn't. The widget's own request had caught the Render instance still asleep and got cut off by the 3-second timeout; that same failed attempt had already started waking the instance, so the very next direct hit landed on an instance that was now warm. Two true results, no bug, just two tests separated by exactly enough time for a cold start to resolve in between. Bumped the timeout to 8s afterward specifically to give background settings fetches (nobody's staring at the widget waiting on this one, unlike `/chat`) more room before giving up.
+
+## What confused me (the honest section)
+
+- Briefly treated "the site is static, how would it change the bot specs" as a real contradiction before the `<script src>`-as-pointer model actually clicked — conflated "the HTML never changes" with "nothing about the page's behavior can change," which isn't the same thing at all.
+- Assumed a `502` on a big-file upload test meant something was fundamentally wrong with my own request, before realizing it was actually consistent with the guard not existing on that path yet — my test wasn't broken, the feature I was testing for just wasn't fully built.
+- Made the same missing-`<a>`-tag mistake twice in immediate succession — worth remembering that "still error" as a report doesn't actually tell anyone (including future me) whether a fix landed; pasting the actual current file content is what catches a paste that silently didn't take.
+
+## Where things stand heading into Week 6
+
+Full Week 5 scope closed: widget live-settings + autoscroll, category system, Sessions + Analytics + Declined pages all built and regression-tested, Accept/Decline race condition proven safe in both directions, two-tenant full flow and the cross-tenant attack script both clean on a fresh rerun. Carried forward, not mine: Bot Settings' double-submit bug and missing save-state, both handed to Mahi directly. 

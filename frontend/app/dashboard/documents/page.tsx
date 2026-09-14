@@ -56,7 +56,7 @@ export default function DocumentsPage() {
 
     const { getRootProps, getInputProps } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
-        disabled: !theme.trim(), // can't drop a file until a category is entered
+        disabled: !theme.trim() || status === "uploading", // can't drop a file until a category is entered, or while one's already uploading
         
         onDrop: async (files) => {
             const file = files[0];
@@ -149,7 +149,7 @@ export default function DocumentsPage() {
             <div
                 {...getRootProps()}
                 className={`border-2 border-dashed p-8 text-center rounded-md ${
-                    theme.trim() ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+                theme.trim() && status !== "uploading" ? "cursor-pointer" : "cursor-not-allowed opacity-50"
                 }`}
             >
                 <input {...getInputProps()} />

@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import Sidebar from "@/components/sidebar"
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const { session, loading, role, status } = useAuth();
@@ -35,29 +36,22 @@ useEffect(() => {
     }
 
     return (
-        <div className="flex">
-            <nav className="w-56 border-r p-4 flex flex-col">
-                <a href="/dashboard/analytics">Analytics</a>
-                <a href="/dashboard/settings">Bot Settings</a>
-                {role === "owner" && (
-                    <>
-                    <a href="/dashboard/embed">Embed Script</a>
-                    <a href="/dashboard/admin/invites">Invites</a>
-                    </>
-                )}
-                <a href="/dashboard/sessions">Chat Sessions</a>
-                <a href="/dashboard/documents">Documents & FAQs</a>
-                <button
-                    onClick={async () => {
-                        await supabase.auth.signOut();
-                        router.push("/login");
-                    }}
-                    className="mt-4 text-left text-sm text-gray-400 underline"
-                >
-                    Log out
-                </button>
-            </nav>
-            <main className="flex-1 p-6">{children}</main>
-        </div>
-    );
+         <div className="flex">
+      <Sidebar
+        isOwner={role === "owner"}
+        footer={
+          <button
+            onClick={async () => {
+              await supabase.auth.signOut();
+              router.push("/login");
+            }}
+            className="text-left text-sm text-gray-400 hover:text-white transition-colors"
+          >
+            Log out
+          </button>
+        }
+      />
+      <main className="flex-1 p-6 bg-[#0B0B0C] min-h-screen">{children}</main>
+    </div>
+  );
 }

@@ -3,21 +3,15 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
+import MetricCard from "@/components/MetricCard";
+import SessionsOverTimeChart from "@/components/SessionsOverTimeChart";
+import MessagesVolumeChart from "@/components/MessagesVolumeChart";
 
 type Stats = {
     sessionCount: number;
     messageCount: number;
     avgLatencyMs: number | null;
 };
-
-import SessionsOverTimeChart from "@/components/SessionsOverTimeChart";
-import MessagesVolumeChart from "@/components/MessagesVolumeChart";
-
-// inside your Analytics page component, wherever `supabase` is already defined:
-<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-  <SessionsOverTimeChart supabase={supabase} daysBack={14} />
-  <MessagesVolumeChart supabase={supabase} daysBack={14} />
-</div>
 
 export default function AnalyticsPage() {
     const { tenantId } = useAuth();
@@ -62,29 +56,26 @@ export default function AnalyticsPage() {
         fetchStats();
     }, [tenantId]);
 
-    if (loading) return <p className="text-sm text-gray-400">Loading analytics...</p>;
-    if (!stats) return <p className="text-sm text-red-500">Couldn't load analytics.</p>;
+    if (loading) return <p className="text-sm text-text-secondary">Loading analytics...</p>;
+    if (!stats) return <p className="text-sm text-status-declined">Couldn't load analytics.</p>;
 
     return (
-        <div>
-            <h1 className="text-xl font-bold mb-6">Analytics</h1>
+        <div className="p-8">
+            <h1 className="text-2xl font-semibold text-text-primary mb-6">Analytics</h1>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <StatCard label="Chat sessions" value={stats.sessionCount} />
-                <StatCard label="Total messages" value={stats.messageCount} />
-                <StatCard
+                <MetricCard label="Chat sessions" value={stats.sessionCount} />
+                <MetricCard label="Total messages" value={stats.messageCount} />
+                <MetricCard
                     label="Avg. response time"
                     value={stats.avgLatencyMs != null ? `${stats.avgLatencyMs}ms` : "—"}
                 />
             </div>
-        </div>
-    );
-}
 
-function StatCard({ label, value }: { label: string; value: string | number }) {
-    return (
-        <div className="border border-gray-800 rounded-lg p-4">
-            <p className="text-sm text-gray-400">{label}</p>
-            <p className="text-2xl font-bold mt-1">{value}</p>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+                <SessionsOverTimeChart supabase={supabase} daysBack={14} />
+                <MessagesVolumeChart supabase={supabase} daysBack={14} />
+            </div>
         </div>
     );
 }

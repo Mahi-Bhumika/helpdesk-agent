@@ -10,6 +10,15 @@ type Stats = {
     avgLatencyMs: number | null;
 };
 
+import SessionsOverTimeChart from "@/components/SessionsOverTimeChart";
+import MessagesVolumeChart from "@/components/MessagesVolumeChart";
+
+// inside your Analytics page component, wherever `supabase` is already defined:
+<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+  <SessionsOverTimeChart supabase={supabase} daysBack={14} />
+  <MessagesVolumeChart supabase={supabase} daysBack={14} />
+</div>
+
 export default function AnalyticsPage() {
     const { tenantId } = useAuth();
     const [stats, setStats] = useState<Stats | null>(null);

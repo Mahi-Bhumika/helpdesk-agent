@@ -24,3 +24,56 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-obsidian text-text-primary font-sans antialiased;
+  }
+
+  ::selection {
+    @apply bg-accent-violet/30 text-white;
+  }
+
+  /* visible keyboard focus, kept subtle but real */
+  :focus-visible {
+    outline: 2px solid #7C3AED;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  /* Base glass surface — used by GlassCard, and anywhere else that needs the material */
+  .glass {
+    @apply bg-white/[0.03] backdrop-blur-glass border border-white/[0.08] rounded-xl2 shadow-card;
+  }
+
+  .glass-hover {
+    @apply transition-colors duration-200 hover:bg-white/[0.05] hover:border-white/[0.14];
+  }
+
+  /* Thin luminous edge, sits on top of .glass for emphasis (e.g. active nav item, featured card) */
+  .glass-glow-border {
+    box-shadow:
+      inset 0 0 0 1px rgba(124, 58, 237, 0.35),
+      0 0 24px -6px rgba(124, 58, 237, 0.45);
+  }
+
+  /* Alternating row highlight for tables/data grids */
+  .row-alt:nth-child(even) {
+    @apply bg-white/[0.015];
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

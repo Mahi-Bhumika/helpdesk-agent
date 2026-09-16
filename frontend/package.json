@@ -15,6 +15,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-dropzone": "^20.1.1",
+    "recharts": "^3.10.1",
     "tsx": "^4.23.12"
   },
   "devDependencies": {

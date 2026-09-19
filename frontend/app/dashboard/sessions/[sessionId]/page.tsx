@@ -21,6 +21,7 @@ type Message = {
 
 export default function SessionTranscriptPage() {
     const { sessionId } = useParams<{ sessionId: string }>();
+    console.log("sessionId from route:", sessionId);
     const router = useRouter();
     const [messages, setMessages] = useState<Message[]>([]);
     const [loading, setLoading] = useState(true);

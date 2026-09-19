@@ -1,50 +1,298 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+  BarChart3,
+  MessageSquare,
+  ExternalLink,
+  ArrowRight,
+  Sparkles,
+  FileText,
+} from "lucide-react";
+import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
-import Link from "next/link";
+import GlassCard from "@/components/GlassCard";
+import { fetchSessionsPerDay, DailyCount } from "@/lib/analyticsQueries";
 
-export default function DashboardHome() {
-    const { tenantId } = useAuth();
-    const [websiteDomain, setWebsiteDomain] = useState<string | null>(null);
+interface RecentSession {
+  session_id: string;
+  start_datetime: string;
+  message_count: number;
+}
 
-    useEffect(() => {
-        async function fetchDomain() {
-            if (!tenantId) return;
-            const { data } = await supabase
-                .from("tenants")
-                .select("website_domain")
-                .eq("tenant_id", tenantId)
-                .single();
-            setWebsiteDomain(data?.website_domain ?? null);
-        }
-        fetchDomain();
-    }, [tenantId]);
+function LivePill() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-status-activeSoft text-status-active">
+      <span className="relative flex h-2 w-2">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-status-active opacity-75" />
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-status-active" />
+      </span>
+      Live
+    </span>
+  );
+}
 
-    return (
-        <div>
-            <h1 className="text-xl font-bold mb-4">Dashboard</h1>
+function Sparkline({ data, color }: { data: DailyCount[]; color: string }) {
+  return (
+    <div className="h-12 w-full opacity-80">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`spark-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity={0.5} />
+              <stop offset="100%" stopColor={color} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <Area
+            type="monotone"
+            dataKey="count"
+            stroke={color}
+            strokeWidth={2}
+            fill={`url(#spark-${color.replace("#", "")})`}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
-            <div className="flex flex-wrap gap-3 mb-6">
-                <Link href="/dashboard/sessions" className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900">
-                    View chat sessions →
-                </Link>
-                <Link href="/dashboard/analytics" className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900">
-                    View analytics →
-                </Link>
-                {websiteDomain && (
-                <a
-                href={websiteDomain.startsWith("http") ? websiteDomain : `https://${websiteDomain}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm border border-gray-700 rounded-md px-3 py-2 hover:bg-gray-900"
-                >
-                Try your bot on your site ↗
-                </a>
-            )}
+const QUICK_ACTIONS = [
+  {
+    href: "/dashboard/sessions",
+    icon: MessageSquare,
+    title: "View chat sessions",
+    subtitle: "See every conversation your bot's had",
+  },
+  {
+    href: "/dashboard/analytics",
+    icon: BarChart3,
+    title: "View analytics",
+    subtitle: "Sessions, messages, and trends over time",
+  },
+  {
+    href: "/dashboard/documents",
+    icon: FileText,
+    title: "Manage documents",
+    subtitle: "Upload or review your bot's knowledge base",
+  },
+];
+
+export default function DashboardOverviewPage() {
+  const { tenantId } = useAuth();
+  const [botName, setBotName] = useState<string | null>(null);
+  const [websiteDomain, setWebsiteDomain] = useState<string | null>(null);
+  const [sessionCount, setSessionCount] = useState<number | null>(null);
+  const [messageCount, setMessageCount] = useState<number | null>(null);
+  const [sparklineData, setSparklineData] = useState<DailyCount[] | null>(null);
+  const [recentSessions, setRecentSessions] = useState<RecentSession[] | null>(null);
+
+  useEffect(() => {
+    if (!tenantId) return;
+
+    async function load() {
+      const [{ data: tenantRow }, { count: sCount }, { count: mCount }, sparkline] =
+        await Promise.all([
+          supabase
+            .from("tenants")
+            .select("bot_name, website_domain")
+            .eq("tenant_id", tenantId)
+            .maybeSingle(),
+          supabase
+            .from("chat_sessions")
+            .select("*", { count: "exact", head: true })
+            .eq("tenant_id", tenantId),
+          supabase
+            .from("messages")
+            .select("*", { count: "exact", head: true })
+            .eq("tenant_id", tenantId),
+          fetchSessionsPerDay(supabase, 7).catch(() => null),
+        ]);
+
+      setBotName(tenantRow?.bot_name ?? null);
+      setWebsiteDomain(tenantRow?.website_domain ?? null);
+      setSessionCount(sCount ?? 0);
+      setMessageCount(mCount ?? 0);
+      setSparklineData(sparkline);
+
+      const { data: sessionRows } = await supabase
+        .from("chat_sessions")
+        .select("session_id, start_datetime")
+        .eq("tenant_id", tenantId)
+        .order("start_datetime", { ascending: false })
+        .limit(3);
+
+      if (sessionRows && sessionRows.length > 0) {
+        const ids = sessionRows.map((s) => s.session_id);
+        const { data: msgRows } = await supabase
+          .from("messages")
+          .select("session_id")
+          .in("session_id", ids);
+
+        const counts = new Map<string, number>();
+        (msgRows ?? []).forEach((m) =>
+          counts.set(m.session_id, (counts.get(m.session_id) ?? 0) + 1)
+        );
+
+        setRecentSessions(
+          sessionRows.map((s) => ({
+            session_id: s.session_id,
+            start_datetime: s.start_datetime,
+            message_count: counts.get(s.session_id) ?? 0,
+          }))
+        );
+      } else {
+        setRecentSessions([]);
+      }
+    }
+
+    load();
+  }, [tenantId]);
+
+  function timeAgo(iso: string) {
+    const diffMins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (diffMins < 1) return "just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.round(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${Math.round(diffHours / 24)}d ago`;
+  }
+
+  return (
+    <div className="p-8">
+      {/* Hero */}
+      <GlassCard glow padding="lg" className="mb-8 relative overflow-hidden">
+        <div className="absolute -top-24 -right-24 h-64 w-64 rounded-full bg-gradient-brand opacity-20 blur-3xl pointer-events-none" />
+        <div className="relative flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <div className="flex items-center gap-3 mb-2">
+              <Sparkles className="h-5 w-5 text-accent-violet" />
+              <h1 className="text-2xl font-semibold text-text-primary">
+                Welcome back{botName ? `, ${botName}` : ""}
+              </h1>
             </div>
-            {/* rest of your existing dashboard home content, if any */}
+            <div className="flex items-center gap-3">
+              <LivePill />
+              {websiteDomain && (
+                <span className="text-sm text-text-secondary">
+                  serving <span className="text-text-primary">{websiteDomain}</span>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {websiteDomain && (
+            <a
+              href={`https://${websiteDomain}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium bg-gradient-brand text-white shadow-glow hover:brightness-110 transition-all"
+            >
+              Try your bot on your site
+              <ExternalLink className="h-4 w-4" />
+            </a>
+          )}
         </div>
-    );
+      </GlassCard>
+
+      {/* Stat cards with sparklines */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
+        <GlassCard padding="lg">
+          <div className="flex items-start justify-between mb-1">
+            <span className="text-sm text-text-secondary">Chat sessions</span>
+            <MessageSquare className="h-4 w-4 text-text-muted" />
+          </div>
+          <span className="text-3xl font-semibold text-text-primary">
+            {sessionCount ?? <span className="inline-block h-8 w-12 rounded bg-white/[0.06] animate-pulse" />}
+          </span>
+          <div className="mt-2 -mb-2">
+            {sparklineData ? (
+              <Sparkline data={sparklineData} color="#7C3AED" />
+            ) : (
+              <div className="h-12 w-full rounded bg-white/[0.03] animate-pulse" />
+            )}
+          </div>
+        </GlassCard>
+
+        <GlassCard padding="lg">
+          <div className="flex items-start justify-between mb-1">
+            <span className="text-sm text-text-secondary">Total messages</span>
+            <BarChart3 className="h-4 w-4 text-text-muted" />
+          </div>
+          <span className="text-3xl font-semibold text-text-primary">
+            {messageCount ?? <span className="inline-block h-8 w-12 rounded bg-white/[0.06] animate-pulse" />}
+          </span>
+          <div className="mt-2 -mb-2">
+            {sparklineData ? (
+              <Sparkline data={sparklineData} color="#4F46E5" />
+            ) : (
+              <div className="h-12 w-full rounded bg-white/[0.03] animate-pulse" />
+            )}
+          </div>
+        </GlassCard>
+      </div>
+
+      {/* Quick actions */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+        {QUICK_ACTIONS.map(({ href, icon: Icon, title, subtitle }) => (
+          <Link key={href} href={href}>
+            <GlassCard interactive padding="lg" className="h-full group">
+              <div className="flex items-center justify-between mb-3">
+                <div className="h-9 w-9 rounded-lg bg-gradient-brand-soft flex items-center justify-center">
+                  <Icon className="h-4.5 w-4.5 text-accent-violet" />
+                </div>
+                <ArrowRight className="h-4 w-4 text-text-muted group-hover:text-text-primary group-hover:translate-x-0.5 transition-all" />
+              </div>
+              <p className="text-sm font-medium text-text-primary">{title}</p>
+              <p className="text-xs text-text-secondary mt-1">{subtitle}</p>
+            </GlassCard>
+          </Link>
+        ))}
+      </div>
+
+      {/* Recent activity */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-medium text-text-primary">Recent activity</h2>
+          <Link href="/dashboard/sessions" className="text-sm text-accent-violet hover:underline">
+            View all →
+          </Link>
+        </div>
+
+        <GlassCard padding="none">
+          {recentSessions === null && (
+            <div className="p-6 space-y-3">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="h-10 w-full rounded-md bg-white/[0.04] animate-pulse" />
+              ))}
+            </div>
+          )}
+
+          {recentSessions && recentSessions.length === 0 && (
+            <p className="p-10 text-center text-sm text-text-secondary">
+              No conversations yet — once your widget is live, they'll show up here.
+            </p>
+          )}
+
+          {recentSessions && recentSessions.length > 0 && (
+            <div>
+              {recentSessions.map((s, i) => (
+                <Link
+                  key={s.session_id}
+                  href={`/dashboard/sessions/${s.session_id}`}
+                  className={`flex items-center justify-between px-6 py-4 hover:bg-white/[0.03] transition-colors ${
+                    i !== recentSessions.length - 1 ? "border-b border-white/[0.06]" : ""
+                  }`}
+                >
+                  <span className="text-sm text-text-primary">{timeAgo(s.start_datetime)}</span>
+                  <span className="text-sm text-text-secondary">{s.message_count} messages</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </GlassCard>
+      </div>
+    </div>
+  );
 }

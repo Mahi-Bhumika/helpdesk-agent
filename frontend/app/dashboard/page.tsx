@@ -10,11 +10,9 @@ import {
   Sparkles,
   FileText,
 } from "lucide-react";
-import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import GlassCard from "@/components/GlassCard";
-import { fetchSessionsPerDay, DailyCount } from "@/lib/analyticsQueries";
 
 interface RecentSession {
   session_id: string;
@@ -31,30 +29,6 @@ function LivePill() {
       </span>
       Live
     </span>
-  );
-}
-
-function Sparkline({ data, color }: { data: DailyCount[]; color: string }) {
-  return (
-    <div className="h-12 w-full opacity-80">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-          <defs>
-            <linearGradient id={`spark-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.5} />
-              <stop offset="100%" stopColor={color} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <Area
-            type="monotone"
-            dataKey="count"
-            stroke={color}
-            strokeWidth={2}
-            fill={`url(#spark-${color.replace("#", "")})`}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
   );
 }
 
@@ -81,40 +55,34 @@ const QUICK_ACTIONS = [
 
 export default function DashboardOverviewPage() {
   const { tenantId } = useAuth();
-  const [botName, setBotName] = useState<string | null>(null);
   const [websiteDomain, setWebsiteDomain] = useState<string | null>(null);
   const [sessionCount, setSessionCount] = useState<number | null>(null);
   const [messageCount, setMessageCount] = useState<number | null>(null);
-  const [sparklineData, setSparklineData] = useState<DailyCount[] | null>(null);
   const [recentSessions, setRecentSessions] = useState<RecentSession[] | null>(null);
 
   useEffect(() => {
     if (!tenantId) return;
 
     async function load() {
-      const [{ data: tenantRow }, { count: sCount }, { count: mCount }, sparkline] =
-        await Promise.all([
-          supabase
-            .from("tenants")
-            .select("bot_name, website_domain")
-            .eq("tenant_id", tenantId)
-            .maybeSingle(),
-          supabase
-            .from("chat_sessions")
-            .select("*", { count: "exact", head: true })
-            .eq("tenant_id", tenantId),
-          supabase
-            .from("messages")
-            .select("*", { count: "exact", head: true })
-            .eq("tenant_id", tenantId),
-          fetchSessionsPerDay(supabase, 7).catch(() => null),
-        ]);
+      const [{ data: tenantRow }, { count: sCount }, { count: mCount }] = await Promise.all([
+        supabase
+          .from("tenants")
+          .select("website_domain")
+          .eq("tenant_id", tenantId)
+          .maybeSingle(),
+        supabase
+          .from("chat_sessions")
+          .select("*", { count: "exact", head: true })
+          .eq("tenant_id", tenantId),
+        supabase
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("tenant_id", tenantId),
+      ]);
 
-      setBotName(tenantRow?.bot_name ?? null);
       setWebsiteDomain(tenantRow?.website_domain ?? null);
       setSessionCount(sCount ?? 0);
       setMessageCount(mCount ?? 0);
-      setSparklineData(sparkline);
 
       const { data: sessionRows } = await supabase
         .from("chat_sessions")
@@ -168,9 +136,7 @@ export default function DashboardOverviewPage() {
           <div>
             <div className="flex items-center gap-3 mb-2">
               <Sparkles className="h-5 w-5 text-accent-violet" />
-              <h1 className="text-2xl font-semibold text-text-primary">
-                Welcome back{botName ? `, ${botName}` : ""}
-              </h1>
+              <h1 className="text-2xl font-semibold text-text-primary">Welcome back</h1>
             </div>
             <div className="flex items-center gap-3">
               <LivePill />
@@ -183,8 +149,8 @@ export default function DashboardOverviewPage() {
           </div>
 
           {websiteDomain && (
-            <a
-              href={`https://${websiteDomain}`}
+            
+             <a href={`https://${websiteDomain}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium bg-gradient-brand text-white shadow-glow hover:brightness-110 transition-all"
@@ -196,7 +162,7 @@ export default function DashboardOverviewPage() {
         </div>
       </GlassCard>
 
-      {/* Stat cards with sparklines */}
+      {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
         <GlassCard padding="lg">
           <div className="flex items-start justify-between mb-1">
@@ -206,13 +172,6 @@ export default function DashboardOverviewPage() {
           <span className="text-3xl font-semibold text-text-primary">
             {sessionCount ?? <span className="inline-block h-8 w-12 rounded bg-white/[0.06] animate-pulse" />}
           </span>
-          <div className="mt-2 -mb-2">
-            {sparklineData ? (
-              <Sparkline data={sparklineData} color="#7C3AED" />
-            ) : (
-              <div className="h-12 w-full rounded bg-white/[0.03] animate-pulse" />
-            )}
-          </div>
         </GlassCard>
 
         <GlassCard padding="lg">
@@ -223,13 +182,6 @@ export default function DashboardOverviewPage() {
           <span className="text-3xl font-semibold text-text-primary">
             {messageCount ?? <span className="inline-block h-8 w-12 rounded bg-white/[0.06] animate-pulse" />}
           </span>
-          <div className="mt-2 -mb-2">
-            {sparklineData ? (
-              <Sparkline data={sparklineData} color="#4F46E5" />
-            ) : (
-              <div className="h-12 w-full rounded bg-white/[0.03] animate-pulse" />
-            )}
-          </div>
         </GlassCard>
       </div>
 

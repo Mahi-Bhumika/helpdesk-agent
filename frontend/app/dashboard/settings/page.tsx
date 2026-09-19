@@ -3,29 +3,37 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
+import { authedFetch } from "@/lib/api";
+import GlassCard from "@/components/GlassCard";
+import Button from "@/components/Button";
 
 export default function SettingsPage() {
     const { tenantId } = useAuth();
     const [botName, setBotName] = useState("");
     const [greetingMessage, setGreetingMessage] = useState("");
-    const [themeColor, setThemeColor] = useState("#000000");
+    const [themeColor, setThemeColor] = useState("#7C3AED");
+    const [websiteDomain, setWebsiteDomain] = useState("");
+
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [savingDomain, setSavingDomain] = useState(false);
+    const [domainSaved, setDomainSaved] = useState(false);
 
     useEffect(() => {
         async function fetchTenant() {
             if (!tenantId) return;
             const { data, error } = await supabase
                 .from("tenants")
-                .select("bot_name, greeting_message, theme_color")
+                .select("bot_name, greeting_message, theme_color, website_domain")
                 .eq("tenant_id", tenantId)
                 .single();
 
             if (!error && data) {
                 setBotName(data.bot_name ?? "");
                 setGreetingMessage(data.greeting_message ?? "");
-                setThemeColor(data.theme_color ?? "#000000");
+                setThemeColor(data.theme_color ?? "#7C3AED");
+                setWebsiteDomain(data.website_domain ?? "");
             }
             setLoading(false);
         }
@@ -51,93 +59,109 @@ export default function SettingsPage() {
         if (!error) setSaved(true);
     };
 
-        // State, alongside your existing botName/greeting/theme state
-    const [websiteDomain, setWebsiteDomain] = useState("");
-
-    // Add to your existing useEffect that loads current settings, or a new one:
-    useEffect(() => {
-    const fetchTenant = async () => {
-        const { data } = await supabase
-        .from("tenants")
-        .select("website_domain")
-        .single();
-        if (data?.website_domain) setWebsiteDomain(data.website_domain);
-    };
-    fetchTenant();
-    }, []);
-
-    // Save handler
     const handleSaveWebsiteDomain = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/tenants/website-domain`, {
-        method: "PUT",
-        headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: JSON.stringify({ website_domain: websiteDomain }),
-    });
-  if (!res.ok) {
-    console.error("Failed to save website domain");
-    return;
-  }
-  // show a success toast/message, matching whatever pattern your other settings saves use
-};
+        setSavingDomain(true);
+        setDomainSaved(false);
+
+        const res = await authedFetch("/tenants/website-domain", {
+            method: "PUT",
+            body: JSON.stringify({ website_domain: websiteDomain }),
+        });
+
+        setSavingDomain(false);
+        if (!res.ok) {
+            console.error("Failed to save website domain");
+            return;
+        }
+        setDomainSaved(true);
+    };
 
     if (!tenantId || loading) {
-        return <div>Loading settings...</div>;
+        return <div className="p-8 text-text-secondary">Loading settings...</div>;
     }
 
     return (
-        <div>
-            <h1 className="text-xl font-bold mb-6">Bot Settings</h1>
-            <form onSubmit={handleSave} className="flex max-w-sm flex-col gap-4">
-                <label className="flex flex-col gap-1">
-                    <span className="text-sm text-gray-400">Bot name</span>
-                    <input
-                        type="text"
-                        value={botName}
-                        onChange={(e) => setBotName(e.target.value)}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                </label>
-                <label className="flex flex-col gap-1">
-                    <span className="text-sm text-gray-400">Greeting message</span>
-                    <textarea
-                        value={greetingMessage}
-                        onChange={(e) => setGreetingMessage(e.target.value)}
-                        className="rounded-md border border-gray-300 px-3 py-2"
-                    />
-                </label>
-                <label className="flex flex-col gap-1">
-                    <span className="text-sm text-gray-400">Theme color</span>
-                    <input
-                        type="color"
-                        value={themeColor}
-                        onChange={(e) => setThemeColor(e.target.value)}
-                        className="h-10 w-20 rounded-md border border-gray-300"
-                    />
-                </label>
-                <button
-                    type="submit"
-                    disabled={saving}
-                    className="rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800"
-                >
-                    {saving ? "Saving..." : "Save changes"}
-                </button>
-                {saved && <p className="text-sm text-green-500">Saved ✓</p>}
-                <label>Your Website Domain</label>
-                <input
-                    type="text"
-                    value={websiteDomain}
-                    onChange={(e) => setWebsiteDomain(e.target.value)}
-                    placeholder="yourcompany.com"
-                />
-                <p style={{ fontSize: "0.85em", color: "#888" }}>
-                    The domain where your chat widget is embedded. Required for the widget to work.
-                </p>
-                <button onClick={handleSaveWebsiteDomain}>Save</button>
-            </form>
+        <div className="p-8">
+            <h1 className="text-2xl font-semibold text-text-primary mb-6">Bot Settings</h1>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="flex flex-col gap-6">
+                    <GlassCard padding="lg">
+                        <form onSubmit={handleSave} className="flex flex-col gap-4">
+                            <label className="flex flex-col gap-1.5">
+                                <span className="text-sm text-text-secondary">Bot name</span>
+                                <input
+                                    type="text"
+                                    value={botName}
+                                    onChange={(e) => setBotName(e.target.value)}
+                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                />
+                            </label>
+                            <label className="flex flex-col gap-1.5">
+                                <span className="text-sm text-text-secondary">Greeting message</span>
+                                <textarea
+                                    value={greetingMessage}
+                                    onChange={(e) => setGreetingMessage(e.target.value)}
+                                    rows={3}
+                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                />
+                            </label>
+                            <label className="flex flex-col gap-1.5">
+                                <span className="text-sm text-text-secondary">Theme color</span>
+                                <input
+                                    type="color"
+                                    value={themeColor}
+                                    onChange={(e) => setThemeColor(e.target.value)}
+                                    className="h-10 w-20 rounded-lg border border-white/[0.1] bg-transparent"
+                                />
+                            </label>
+                            <Button type="submit" disabled={saving}>
+                                {saving ? "Saving..." : "Save changes"}
+                            </Button>
+                            {saved && <p className="text-sm text-status-active">Saved ✓</p>}
+                        </form>
+                    </GlassCard>
+
+                    <GlassCard padding="lg">
+                        <label className="flex flex-col gap-1.5">
+                            <span className="text-sm text-text-secondary">Your website domain</span>
+                            <input
+                                type="text"
+                                value={websiteDomain}
+                                onChange={(e) => setWebsiteDomain(e.target.value)}
+                                placeholder="yourcompany.com"
+                                className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                            />
+                        </label>
+                        <p className="text-xs text-text-muted mt-1.5 mb-4">
+                            The domain where your chat widget is embedded. Required for the widget to work.
+                        </p>
+                        <Button variant="secondary" onClick={handleSaveWebsiteDomain} disabled={savingDomain}>
+                            {savingDomain ? "Saving..." : "Save"}
+                        </Button>
+                        {domainSaved && <p className="text-sm text-status-active mt-2">Saved ✓</p>}
+                    </GlassCard>
+                </div>
+
+                {/* Live widget preview */}
+                <GlassCard padding="lg" className="h-fit">
+                    <p className="text-sm text-text-secondary mb-4">Widget preview</p>
+                    <div className="rounded-xl2 bg-obsidian-surface border border-white/[0.08] p-4 flex flex-col gap-3 h-80">
+                        <div
+                            className="self-start max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-white"
+                            style={{ backgroundColor: themeColor }}
+                        >
+                            {greetingMessage || "Hi! How can I help you today?"}
+                        </div>
+                        <div className="self-end max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-white/[0.08] text-text-primary">
+                            What are your business hours?
+                        </div>
+                    </div>
+                    <p className="text-xs text-text-muted mt-3 text-center">
+                        {botName || "Your bot"}'s greeting, shown as visitors will see it
+                    </p>
+                </GlassCard>
+            </div>
         </div>
     );
 }

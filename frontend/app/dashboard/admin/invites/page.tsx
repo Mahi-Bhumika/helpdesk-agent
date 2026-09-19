@@ -5,6 +5,8 @@ import { useAuth } from "@/lib/auth-context";
 import { authedFetch } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import GlassCard from "@/components/GlassCard";
+import Button from "@/components/Button";
 
 type PendingUser = {
     user_id: string;
@@ -108,19 +110,19 @@ export default function InvitesAdminPage() {
         }
     };
 
-    if (loading) return <p className="text-sm text-gray-400">Loading pending requests...</p>;
+    if (loading) return <div className="p-8 text-sm text-text-secondary">Loading pending requests...</div>;
 
     return (
-        <div>
-            <h1 className="text-xl font-bold mb-4">Invites</h1>
+        <div className="p-8">
+            <h1 className="text-2xl font-semibold text-text-primary mb-6">Invites</h1>
 
             {/* Invite link section */}
-            <div className="mb-8 rounded-md border border-gray-700 bg-gray-900 p-4">
-                <h2 className="text-sm font-semibold text-gray-300 mb-2">
+            <GlassCard padding="lg" className="mb-8">
+                <h2 className="text-sm font-medium text-text-secondary mb-3">
                     Team invite link
                 </h2>
                 {inviteLoading ? (
-                    <p className="text-sm text-gray-500">Loading link...</p>
+                    <div className="h-10 w-full rounded-lg bg-white/[0.04] animate-pulse" />
                 ) : inviteUrl ? (
                     <div className="flex items-center gap-2">
                         <input
@@ -128,70 +130,75 @@ export default function InvitesAdminPage() {
                             readOnly
                             value={inviteUrl}
                             onClick={(e) => e.currentTarget.select()}
-                            className="flex-1 rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-300"
+                            className="flex-1 rounded-lg border border-white/[0.1] bg-obsidian-surface px-3 py-2.5 text-sm text-text-primary"
                         />
-                        <button
-                            onClick={handleCopy}
-                            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 whitespace-nowrap"
-                        >
+                        <Button variant="secondary" onClick={handleCopy} className="whitespace-nowrap">
                             {copied ? "Copied ✓" : "Copy"}
-                        </button>
+                        </Button>
                     </div>
                 ) : (
-                    <p className="text-sm text-red-500">
+                    <p className="text-sm text-status-declined">
                         No invite token found for this tenant.
                     </p>
                 )}
-                <p className="mt-2 text-xs text-gray-500">
+                <p className="mt-3 text-xs text-text-muted">
                     Anyone with this link can request to join your team. They&apos;ll
                     show up below once they sign up, waiting on your approval.
                 </p>
-            </div>
+            </GlassCard>
 
             {/* Pending requests */}
-            <h2 className="text-lg font-semibold mb-2">Pending requests</h2>
+            <h2 className="text-lg font-medium text-text-primary mb-3">Pending requests</h2>
 
-            {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
-
-            {pending.length === 0 ? (
-                <p className="text-sm text-gray-400">No pending requests.</p>
-            ) : (
-                <table className="w-full text-left border-collapse">
-                    <thead>
-                        <tr className="border-b border-gray-700">
-                            <th className="py-2 pr-4">Email</th>
-                            <th className="py-2 pr-4">Requested</th>
-                            <th className="py-2 pr-4">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {pending.map((u) => (
-                            <tr key={u.user_id} className="border-b border-gray-800">
-                                <td className="py-2 pr-4">{u.email}</td>
-                                <td className="py-2 pr-4">
-                                    {new Date(u.invited_at ?? u.created_at).toLocaleString()}
-                                </td>
-                                <td className="py-2 pr-4 flex gap-2">
-                                    <button
-                                        disabled={actioningId === u.user_id}
-                                        onClick={() => handleDecision(u.user_id, "approve")}
-                                        className="rounded-md bg-green-700 px-3 py-1 text-sm text-white disabled:opacity-50"
-                                    >
-                                        Accept
-                                    </button>
-                                    <button
-                                        disabled={actioningId === u.user_id}
-                                        onClick={() => handleDecision(u.user_id, "decline")}
-                                        className="rounded-md bg-red-700 px-3 py-1 text-sm text-white disabled:opacity-50"
-                                    >
-                                        Decline
-                                    </button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+            {error && (
+                <p className="mb-4 text-sm text-status-declined">{error}</p>
             )}
+
+            <GlassCard padding="none">
+                {pending.length === 0 ? (
+                    <p className="p-12 text-center text-sm text-text-secondary">
+                        No pending requests.
+                    </p>
+                ) : (
+                    <table className="w-full text-left">
+                        <thead>
+                            <tr className="border-b border-white/[0.08]">
+                                <th className="px-6 py-4 text-xs font-medium text-text-secondary">Email</th>
+                                <th className="px-6 py-4 text-xs font-medium text-text-secondary">Requested</th>
+                                <th className="px-6 py-4 text-xs font-medium text-text-secondary">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {pending.map((u) => (
+                                <tr key={u.user_id} className="row-alt border-b border-white/[0.04] hover:bg-white/[0.03]">
+                                    <td className="px-6 py-4 text-sm text-text-primary">{u.email}</td>
+                                    <td className="px-6 py-4 text-sm text-text-secondary">
+                                        {new Date(u.invited_at ?? u.created_at).toLocaleString()}
+                                    </td>
+                                    <td className="px-6 py-4 flex gap-2">
+                                        <Button
+                                            size="sm"
+                                            disabled={actioningId === u.user_id}
+                                            onClick={() => handleDecision(u.user_id, "approve")}
+                                            className="!bg-status-activeSoft !text-status-active !shadow-none hover:!bg-status-active/20"
+                                        >
+                                            Accept
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            variant="danger"
+                                            disabled={actioningId === u.user_id}
+                                            onClick={() => handleDecision(u.user_id, "decline")}
+                                        >
+                                            Decline
+                                        </Button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </GlassCard>
         </div>
     );
 }

@@ -675,7 +675,8 @@ async def list_sessions(
                 cs.start_datetime,
                 cs.end_datetime,
                 cs.customer_satisfaction,
-                COUNT(m.message_id) AS message_count
+                COUNT(m.message_id) AS message_count,
+                MAX(m.created_at) AS last_message_at
             FROM chat_sessions cs
             LEFT JOIN messages m ON m.session_id = cs.session_id
             WHERE cs.tenant_id = :tenant_id

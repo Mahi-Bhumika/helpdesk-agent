@@ -4,6 +4,8 @@ import { useAuth } from "@/lib/auth-context";
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
+import GlassCard from "@/components/GlassCard";
+import Button from "@/components/Button";
 
 type EmbedSettings = {
     tenantId : string;
@@ -58,6 +60,12 @@ const jsx = `<script
   return { html, nextTsx, jsx };
 }
 
+const FORMAT_LABELS = {
+  html: "HTML",
+  nextTsx: "Next.js",
+  jsx: "JSX",
+} as const;
+
 export default function EmbedPage() {
 
     const { role, loading : authLoading } = useAuth();
@@ -77,6 +85,7 @@ export default function EmbedPage() {
     const [themeColor, setThemeColor] = useState("#1F8A70");
     const [greetingMessage, setGreetingMessage] = useState("Hi! How can I help?");
     const [loading, setLoading] = useState(true);
+    const [copied, setCopied] = useState(false);
 
     useEffect(() => {
         if (!session) return;
@@ -115,7 +124,7 @@ export default function EmbedPage() {
         fetchEmbedData();
     }, [session]);
 
-    if (loading) return <div> Loading...</div>
+    if (loading) return <div className="p-8 text-text-secondary">Loading...</div>;
     
     const snippets = generateEmbedSnippets({
     tenantId,
@@ -127,45 +136,45 @@ export default function EmbedPage() {
     cdnUrl: "https://helpdesk-agent-mahi-bhumika.vercel.app/widget.js",
     })
 
+    function handleCopy() {
+      navigator.clipboard.writeText(snippets[format]);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+
     return (
-    <div>
-      <h1 className="text-xl font-bold mb-4">Embed Script</h1>
-      <p className="text-sm text-gray-400 mb-4">
+    <div className="p-8">
+      <h1 className="text-2xl font-semibold text-text-primary mb-2">Embed Script</h1>
+      <p className="text-sm text-text-secondary mb-6">
         Paste this snippet into your website&apos;s HTML, right before the closing{" "}
-        <code>&lt;/body&gt;</code> tag.
+        <code className="text-text-primary">&lt;/body&gt;</code> tag.
       </p>
 
-      <div className="flex gap-2 mb-3">
-        <button
-          onClick={() => setFormat("html")}
-          className={format === "html" ? "font-bold underline" : ""}
-        >
-          HTML
-        </button>
-        <button
-          onClick={() => setFormat("nextTsx")}
-          className={format === "nextTsx" ? "font-bold underline" : ""}
-        >
-          Next.js
-        </button>
-        <button
-          onClick={() => setFormat("jsx")}
-          className={format === "jsx" ? "font-bold underline" : ""}
-        >
-          JSX
-        </button>
-      </div>
+      <GlassCard padding="lg">
+        <div className="flex gap-2 mb-4">
+          {(Object.keys(FORMAT_LABELS) as Array<keyof typeof FORMAT_LABELS>).map((key) => (
+            <button
+              key={key}
+              onClick={() => setFormat(key)}
+              className={
+                format === key
+                  ? "rounded-lg px-3 py-1.5 text-sm font-medium bg-gradient-brand text-white shadow-glow"
+                  : "rounded-lg px-3 py-1.5 text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-white/[0.05]"
+              }
+            >
+              {FORMAT_LABELS[key]}
+            </button>
+          ))}
+        </div>
 
-      <pre className="rounded-md border border-gray-700 bg-gray-900 p-4 text-sm overflow-x-auto">
-        {snippets[format]}
-      </pre>
+        <pre className="rounded-xl2 border border-white/[0.08] bg-obsidian-surface p-4 text-sm text-text-primary overflow-x-auto font-mono">
+          {snippets[format]}
+        </pre>
 
-      <button
-        onClick={() => navigator.clipboard.writeText(snippets[format])}
-        className="mt-3 rounded-md bg-black px-4 py-2 text-white hover:bg-gray-800"
-      >
-        Copy to clipboard
-      </button>
+        <Button variant="secondary" onClick={handleCopy} className="mt-4">
+          {copied ? "Copied ✓" : "Copy to clipboard"}
+        </Button>
+      </GlassCard>
     </div>
   );
 }

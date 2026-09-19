@@ -1,4 +1,3 @@
-
 (function () {
   "use strict";
 
@@ -108,26 +107,47 @@
     var sessionId = null;
     var isSending = false;
 
+    function formatTime(date) {
+      var hours = date.getHours();
+      var minutes = date.getMinutes();
+      var ampm = hours >= 12 ? "PM" : "AM";
+      hours = hours % 12 || 12;
+      var minStr = minutes < 10 ? "0" + minutes : String(minutes);
+      return hours + ":" + minStr + " " + ampm;
+    }
+
     // sender is "bot" or "user" — only ever used to pick a CSS class.
     // Text always goes through textContent, never innerHTML, so a
     // visitor's typed message (or a bot answer) can never be parsed
     // as HTML/script.
     function appendMessage(text, sender) {
+      var wrap = document.createElement("div");
+      wrap.className = "HIKA-msg-wrap HIKA-msg-wrap-" + sender;
+
       var msg = document.createElement("div");
       msg.className = "HIKA-msg HIKA-msg-" + sender;
       msg.textContent = text;
-      messagesEl.appendChild(msg);
+      wrap.appendChild(msg);
+
+      var time = document.createElement("span");
+      time.className = "HIKA-timestamp";
+      time.textContent = formatTime(new Date());
+      wrap.appendChild(time);
+
+      messagesEl.appendChild(wrap);
       panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
       return msg;
     }
 
     function appendTyping() {
       var wrap = document.createElement("div");
-      wrap.className = "HIKA-msg HIKA-msg-bot HIKA-typing";
+      wrap.className = "HIKA-msg-wrap HIKA-msg-wrap-bot";
       wrap.innerHTML =
-        '<span class="HIKA-typing-dots">' +
-          '<span class="HIKA-dot"></span><span class="HIKA-dot"></span><span class="HIKA-dot"></span>' +
-        "</span>";
+        '<div class="HIKA-msg HIKA-msg-bot HIKA-typing">' +
+          '<span class="HIKA-typing-dots">' +
+            '<span class="HIKA-dot"></span><span class="HIKA-dot"></span><span class="HIKA-dot"></span>' +
+          "</span>" +
+        "</div>";
       messagesEl.appendChild(wrap);
       panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
       return wrap;
@@ -271,13 +291,18 @@
 
   function buildCSS(config) {
     return (
+      // Load Inter for the widget specifically — this is a small, one-time
+      // request scoped to inside the Shadow DOM style tag, it does not
+      // touch or depend on the host page's own fonts/CSS at all.
+      "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');" +
       // :host resets inherited properties (font, color, line-height,
       // etc.) that would otherwise cascade in from the host page's
       // <body>/<html> rules, even though Shadow DOM blocks rule
       // *matching* from crossing the boundary. This is what makes the
       // widget survive a page with aggressive global CSS.
       ":host{all:initial;}" +
-      ".HIKA-widget-root{position:fixed;z-index:2147483000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}" +
+      ".HIKA-widget-root{position:fixed;z-index:2147483000;" +
+      "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}" +
       ".HIKA-widget-bottom-right{right:20px;bottom:20px;}" +
       ".HIKA-widget-bottom-left{left:20px;bottom:20px;}" +
       ".HIKA-bubble{width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
@@ -286,40 +311,45 @@
       ".HIKA-bubble:hover{transform:scale(1.05);}" +
       ".HIKA-bubble:focus-visible{outline:2px solid " + config.color + ";outline-offset:3px;}" +
       ".HIKA-panel{position:absolute;bottom:72px;right:0;width:340px;max-width:calc(100vw - 40px);" +
-      "height:420px;max-height:calc(100vh - 120px);background:#fff;border-radius:16px;" +
+      "height:420px;max-height:calc(100vh - 120px);background:#fff;border-radius:18px;" +
       "box-shadow:0 12px 40px rgba(0,0,0,0.2);display:flex;flex-direction:column;overflow:hidden;}" +
       ".HIKA-widget-bottom-left .HIKA-panel{right:auto;left:0;}" +
       ".HIKA-panel[hidden]{display:none;}" +
       ".HIKA-panel-header{background:" + config.color + ";color:#fff;padding:14px 16px;" +
       "display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}" +
-      ".HIKA-panel-title{font-weight:600;font-size:15px;}" +
+      ".HIKA-panel-title{font-weight:600;font-size:15px;letter-spacing:-0.01em;}" +
       ".HIKA-close{background:none;border:none;color:#fff;cursor:pointer;padding:2px;display:flex;opacity:0.85;}" +
       ".HIKA-close:hover{opacity:1;}" +
-      ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;}" +
-      ".HIKA-messages{display:flex;flex-direction:column;gap:8px;}" +
-      ".HIKA-msg{max-width:80%;padding:9px 13px;border-radius:14px;font-size:13.5px;" +
-      "line-height:1.4;word-wrap:break-word;white-space:pre-wrap;}" +
-      ".HIKA-msg-bot{align-self:flex-start;background:#f1f1f4;color:#26262e;" +
-      "border-bottom-left-radius:4px;}" +
-      ".HIKA-msg-user{align-self:flex-end;background:" + config.color + ";color:#fff;" +
-      "border-bottom-right-radius:4px;}" +
+      ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;background:#fafafb;}" +
+      ".HIKA-messages{display:flex;flex-direction:column;gap:12px;}" +
+      ".HIKA-msg-wrap{display:flex;flex-direction:column;max-width:82%;}" +
+      ".HIKA-msg-wrap-bot{align-self:flex-start;align-items:flex-start;}" +
+      ".HIKA-msg-wrap-user{align-self:flex-end;align-items:flex-end;}" +
+      ".HIKA-msg{padding:10px 14px;border-radius:16px;font-size:13.5px;" +
+      "line-height:1.45;word-wrap:break-word;white-space:pre-wrap;letter-spacing:-0.003em;}" +
+      ".HIKA-msg-bot{background:linear-gradient(180deg,#ffffff,#f5f5f8);color:#242430;" +
+      "border:1px solid #ececf1;border-bottom-left-radius:5px;" +
+      "box-shadow:0 1px 2px rgba(0,0,0,0.04);}" +
+      ".HIKA-msg-user{background:" + config.color + ";color:#fff;" +
+      "border-bottom-right-radius:5px;box-shadow:0 2px 8px " + config.color + "40;}" +
+      ".HIKA-timestamp{font-size:10.5px;color:#a5a5b0;margin-top:3px;padding:0 4px;}" +
       ".HIKA-typing-dots{display:inline-flex;gap:4px;align-items:center;padding:2px 0;}" +
-      ".HIKA-typing-dots .HIKA-dot{width:6px;height:6px;border-radius:50%;background:#9a9aa4;" +
+      ".HIKA-typing-dots .HIKA-dot{width:6px;height:6px;border-radius:50%;background:#b0b0ba;" +
       "animation:HIKA-bounce 1.2s infinite ease-in-out;}" +
       ".HIKA-typing-dots .HIKA-dot:nth-child(2){animation-delay:0.15s;}" +
       ".HIKA-typing-dots .HIKA-dot:nth-child(3){animation-delay:0.3s;}" +
       "@keyframes HIKA-bounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-4px);opacity:1;}}" +
       ".HIKA-panel-footer{flex-shrink:0;display:flex;align-items:center;gap:8px;" +
-      "padding:10px 12px;border-top:1px solid #ececef;}" +
-      ".HIKA-input{flex:1;border:1px solid #dcdce2;border-radius:20px;padding:8px 14px;" +
+      "padding:10px 12px;border-top:1px solid #ececef;background:#fff;}" +
+      ".HIKA-input{flex:1;border:1px solid #dcdce2;border-radius:20px;padding:9px 14px;" +
       "font-size:13.5px;outline:none;font-family:inherit;box-sizing:border-box;}" +
       ".HIKA-input:focus{border-color:" + config.color + ";}" +
       ".HIKA-input:disabled{background:#f7f7f9;cursor:not-allowed;}" +
       ".HIKA-send{flex-shrink:0;width:34px;height:34px;border-radius:50%;border:none;" +
       "background:" + config.color + ";color:#fff;display:flex;align-items:center;" +
-      "justify-content:center;cursor:pointer;padding:0;}" +
+      "justify-content:center;cursor:pointer;padding:0;box-shadow:0 2px 6px " + config.color + "40;}" +
       ".HIKA-send:hover{opacity:0.9;}" +
-      ".HIKA-send:disabled{opacity:.5;cursor:not-allowed;}"
+      ".HIKA-send:disabled{opacity:.5;cursor:not-allowed;box-shadow:none;}"
     );
   }
 

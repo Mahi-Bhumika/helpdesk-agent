@@ -1,90 +1,154 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
 import { authedFetch } from "@/lib/api";
+import GlassCard from "@/components/GlassCard";
+import Button from "@/components/Button";
 
-type SessionSummary = {
-    session_id: string;
-    start_datetime: string;
-    end_datetime: string | null;
-    customer_satisfaction: number | null;
-    message_count: number;
+type MessageSource = {
+    chunk_text: string;
+    chunk_index: number;
+    relevance_score: number;
 };
 
-export default function SessionsPage() {
-    const [sessions, setSessions] = useState<SessionSummary[]>([]);
+type Message = {
+    message_id: string;
+    sender: "user" | "bot";
+    content: string;
+    response_latency_ms: number | null;
+    created_at: string;
+    sources: MessageSource[];
+};
+
+export default function SessionTranscriptPage() {
+    const { sessionId } = useParams<{ sessionId: string }>();
+    const router = useRouter();
+    const [messages, setMessages] = useState<Message[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [forbidden, setForbidden] = useState(false);
 
     useEffect(() => {
-        async function fetchSessions() {
+        async function fetchTranscript() {
             setLoading(true);
             setError(null);
+            setForbidden(false);
             try {
-                const res = await authedFetch("/sessions", { method: "GET" });
-                if (!res.ok) throw new Error(`Failed to load sessions (HTTP ${res.status})`);
-                setSessions(await res.json());
+                const res = await authedFetch(`/sessions/${sessionId}/messages`, { method: "GET" });
+                if (res.status === 403) { setForbidden(true); return; }
+                if (!res.ok) throw new Error(`Failed to load transcript (HTTP ${res.status})`);
+                setMessages(await res.json());
             } catch (err) {
                 setError(err instanceof Error ? err.message : "Something went wrong.");
             } finally {
                 setLoading(false);
             }
         }
-        fetchSessions();
-    }, []);
+        if (sessionId) fetchTranscript();
+    }, [sessionId]);
 
-    function formatRelativeTime(iso: string) {
-        const diffMins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-        if (diffMins < 1) return "just now";
-        if (diffMins < 60) return `${diffMins}m ago`;
-        const diffHours = Math.round(diffMins / 60);
-        if (diffHours < 24) return `${diffHours}h ago`;
-        return `${Math.round(diffHours / 24)}d ago`;
+    function exportCsv() {
+        if (messages.length === 0) return;
+        const rows = [
+            ["Timestamp", "Sender", "Message", "Latency (ms)"],
+            ...messages.map((m) => [
+                m.created_at,
+                m.sender,
+                m.content.replace(/\n/g, " "),
+                m.response_latency_ms?.toString() ?? "",
+            ]),
+        ];
+        const csv = rows
+            .map((r) => r.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","))
+            .join("\n");
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `session-${sessionId}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
     }
 
     return (
-        <div>
-            <h1 className="text-xl font-bold mb-4">Chat Sessions</h1>
+        <div className="p-8">
+            <div className="flex items-center justify-between mb-6">
+                <button
+                    onClick={() => router.push("/dashboard/sessions")}
+                    className="text-sm text-accent-violet hover:underline"
+                >
+                    ← Back to sessions
+                </button>
+                {messages.length > 0 && (
+                    <Button variant="secondary" size="sm" onClick={exportCsv}>
+                        Export CSV
+                    </Button>
+                )}
+            </div>
 
-            {loading ? (
-                <p className="text-sm text-gray-400">Loading sessions...</p>
-            ) : error ? (
-                <p className="text-sm text-red-500">{error}</p>
-            ) : sessions.length === 0 ? (
-                <p className="text-sm text-gray-400">No chat sessions yet.</p>
-            ) : (
-                <table className="w-full text-left border-collapse">
-                    <thead>
-                        <tr className="border-b border-gray-700">
-                            <th className="py-2 pr-4">Started</th>
-                            <th className="py-2 pr-4">Messages</th>
-                            <th className="py-2 pr-4">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {sessions.map((session) => (
-                            <tr key={session.session_id} className="border-b border-gray-800 hover:bg-gray-900">
-                                <td className="py-2 pr-4">
-                                    <Link href={`/dashboard/sessions/${session.session_id}`} className="block">
-                                        {formatRelativeTime(session.start_datetime)}
-                                    </Link>
-                                </td>
-                                <td className="py-2 pr-4">
-                                    <Link href={`/dashboard/sessions/${session.session_id}`} className="block">
-                                        {session.message_count}
-                                    </Link>
-                                </td>
-                                <td className="py-2 pr-4">
-                                    <Link href={`/dashboard/sessions/${session.session_id}`} className="block">
-                                        {session.end_datetime ? "Ended" : "Ongoing"}
-                                    </Link>
-                                </td>
-                            </tr>
+            <h1 className="text-2xl font-semibold text-text-primary mb-6">Session Transcript</h1>
+
+            <GlassCard padding="lg">
+                {loading && (
+                    <div className="space-y-3">
+                        {[...Array(4)].map((_, i) => (
+                            <div key={i} className="h-12 w-2/3 rounded-2xl bg-white/[0.04] animate-pulse" />
                         ))}
-                    </tbody>
-                </table>
-            )}
+                    </div>
+                )}
+
+                {!loading && forbidden && (
+                    <p className="text-sm text-status-declined">
+                        You don't have access to this session — it may belong to a different tenant.
+                    </p>
+                )}
+
+                {!loading && !forbidden && error && (
+                    <p className="text-sm text-status-declined">{error}</p>
+                )}
+
+                {!loading && !forbidden && !error && messages.length === 0 && (
+                    <p className="text-sm text-text-secondary">No messages in this session.</p>
+                )}
+
+                {!loading && !forbidden && !error && messages.length > 0 && (
+                    <div className="flex flex-col gap-3">
+                        {messages.map((msg) => (
+                            <div
+                                key={msg.message_id}
+                                className={
+                                    msg.sender === "user"
+                                        ? "self-start max-w-[80%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm bg-white/[0.06] text-text-primary"
+                                        : "self-end max-w-[80%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-gradient-brand-soft border border-white/[0.08] text-text-primary"
+                                }
+                            >
+                                <p>{msg.content}</p>
+                                {msg.sender === "bot" && msg.response_latency_ms != null && (
+                                    <p className="text-xs text-text-muted mt-1">{msg.response_latency_ms}ms</p>
+                                )}
+                                {msg.sender === "bot" && msg.sources.length > 0 && (
+                                    <details className="mt-2 text-xs text-text-muted">
+                                        <summary className="cursor-pointer hover:text-text-secondary">
+                                            {msg.sources.length} source{msg.sources.length > 1 ? "s" : ""} cited
+                                        </summary>
+                                        <ul className="mt-1.5 space-y-1.5">
+                                            {msg.sources.map((src, i) => (
+                                                <li key={i} className="border-l-2 border-white/[0.1] pl-2">
+                                                    <span className="font-mono text-status-completed">
+                                                        #{src.chunk_index} · {(src.relevance_score * 100).toFixed(0)}% match
+                                                    </span>
+                                                    <p className="italic text-text-secondary mt-0.5">{src.chunk_text}</p>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </details>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </GlassCard>
         </div>
     );
 }

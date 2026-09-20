@@ -19,13 +19,14 @@ export default function SettingsPage() {
     const [saved, setSaved] = useState(false);
     const [savingDomain, setSavingDomain] = useState(false);
     const [domainSaved, setDomainSaved] = useState(false);
+    const [fallbackMessage, setFallbackMessage] = useState("");
 
     useEffect(() => {
         async function fetchTenant() {
             if (!tenantId) return;
             const { data, error } = await supabase
                 .from("tenants")
-                .select("bot_name, greeting_message, theme_color, website_domain")
+                .select("bot_name, greeting_message, theme_color, website_domain, fallback_message")
                 .eq("tenant_id", tenantId)
                 .single();
 
@@ -34,6 +35,7 @@ export default function SettingsPage() {
                 setGreetingMessage(data.greeting_message ?? "");
                 setThemeColor(data.theme_color ?? "#7C3AED");
                 setWebsiteDomain(data.website_domain ?? "");
+                setFallbackMessage(data.fallback_message ?? "");
             }
             setLoading(false);
         }
@@ -52,6 +54,7 @@ export default function SettingsPage() {
                 bot_name: botName,
                 greeting_message: greetingMessage,
                 theme_color: themeColor,
+                fallback_message: fallbackMessage,
             })
             .eq("tenant_id", tenantId);
 
@@ -103,6 +106,16 @@ export default function SettingsPage() {
                                     value={greetingMessage}
                                     onChange={(e) => setGreetingMessage(e.target.value)}
                                     rows={3}
+                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                />
+                            </label>
+                            <label className="flex flex-col gap-1.5">
+                                <span className="text-sm text-text-secondary">Fallback message</span>
+                                <textarea
+                                    value={fallbackMessage}
+                                    onChange={(e) => setFallbackMessage(e.target.value)}
+                                    rows={2}
+                                    placeholder="Sorry, I don't have an answer for that — try rephrasing or contact support."
                                     className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
                                 />
                             </label>

@@ -13,6 +13,7 @@ type SessionSummary = {
     start_datetime: string;
     end_datetime: string | null;
     customer_satisfaction: number | null;
+     message_count: number | null;
 };
 
 export default function SessionsListPage() {
@@ -120,6 +121,7 @@ export default function SessionsListPage() {
                             <tr className="text-left text-text-muted text-xs border-b border-white/[0.08]">
                                 <th className="pb-2 font-medium">Visitor</th>
                                 <th className="pb-2 font-medium">Started</th>
+                                <th className="pb-2 font-medium">Messages</th> 
                                 <th className="pb-2 font-medium">Status</th>
                                 <th className="pb-2 font-medium">CSAT</th>
                             </tr>
@@ -137,6 +139,7 @@ export default function SessionsListPage() {
                                         {s.end_user_name || s.end_user_email || "Anonymous visitor"}
                                     </td>
                                     <td className="py-3 text-text-secondary">{formatDate(s.start_datetime)}</td>
+                                    <td className="py-3 text-text-secondary">{s.message_count ?? "—"}</td>
                                     <td className="py-3">
                                         {s.end_datetime ? (
                                             <PillBadge status="completed" />

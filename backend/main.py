@@ -348,7 +348,6 @@ class ChatSource(BaseModel):
     chunk_id: str
     relevance_score: float
 
-
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
@@ -359,70 +358,7 @@ class ChatResponse(BaseModel):
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
 
-    tenant_row = await db.execute(
-        text("SELECT website_domain, fallback_message FROM tenants WHERE tenant_id = :tid"),
-        {"tid": query.tenant_id},
-    )
-    tenant = tenant_row.fetchone()
-    if not tenant or not tenant.website_domain:
-        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
-    if not origin or extract_origin(tenant.website_domain) != origin:
-        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
-
-    # Small-talk short-circuit: skip retrieval for greetings
-    
-            # Small-talk short-circuit: skip retrieval for greetings
-    if is_smalltalk(query.question):
-        t_start = time.time()
-        session_id = query.session_id
-        if session_id is None:
-            session_result = await db.execute(
-                text("""
-                    INSERT INTO chat_sessions (tenant_id)
-                    VALUES (:tenant_id)
-                    RETURNING session_id
-                """),
-                {"tenant_id": query.tenant_id},
-            )
-            session_id = str(session_result.fetchone().session_id)
-
-        smalltalk_completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": (
-                    "You are a friendly assistant for a company's support widget. "
-                    "The visitor just sent a greeting, not a real question. "
-                    "Reply with a brief, warm greeting back (1 sentence) and invite them "
-                    "to ask their question. Do not mention documents or context."
-                )},
-                {"role": "user", "content": query.question},
-            ],
-        )
-        answer = smalltalk_completion.choices[0].message.content
-
-        await db.execute(
-            text("""
-                INSERT INTO messages (session_id, tenant_id, sender, content)
-                VALUES (:session_id, :tenant_id, 'user', :content)
-            """),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
-        )
-        latency_ms = int((time.time() - t_start) * 1000)
-        await db.execute(
-            text("""
-                INSERT INTO messages (session_id, tenant_id, sender, content, response_latency_ms)
-                VALUES (:session_id, :tenant_id, 'bot', :content, :latency_ms)
-            """),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer, "latency_ms": latency_ms},
-        )
-        await db.commit()
-
-        return ChatResponse(session_id=str(session_id), answer=answer, sources=[])
-
-
-    
-    # ...rest unchanged
-    # Step 1: create a session if this is the first message
+# Step 1: Create session if missing
     session_id = query.session_id
     if session_id is None:
         session_result = await db.execute(
@@ -435,16 +371,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Filter out chunks with cosine/l2 distance higher than threshold (e.g., 0.6)
-    SIMILARITY_THRESHOLD = 0.60
-
-    retrieved_chunks = [
-        dict(row._mapping) for row in rows 
-        if row.distance <= SIMILARITY_THRESHOLD
-    ]
-
-    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
-        # Step 2: embed the query and retrieve relevant chunks
+    # Step 2: Query vector store FIRST
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
@@ -460,12 +387,18 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         "top_k": query.top_k,
     })
     rows = result.fetchall()
-    retrieved_chunks = [dict(row._mapping) for row in rows]
 
-    # Step 3: build context and call the LLM
-    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks)
+    # Step 3: Filter chunks AFTER rows is populated
+    SIMILARITY_THRESHOLD = 0.60
+    retrieved_chunks = [
+        dict(row._mapping) for row in rows 
+        if row.distance <= SIMILARITY_THRESHOLD
+    ]
+
+    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
+    # Step 4: Prompt and LLM completion
     system_prompt = (
         "You are a helpful, friendly support assistant answering questions based only on the "
         "provided context. Default to 2-4 short sentences, plain conversational language, no "
@@ -474,7 +407,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         "(e.g. 'how do I reset my password'), you may use a short numbered list instead — but "
         "keep each step to one short line, and skip the numbered list entirely if the answer is "
         "naturally just one or two sentences.\n\n"
-        f'If the answer isn\'t in the context, respond with strictly and exactly this message and nothing else: "{fallback_text}"\n\n'
+        f'If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond with strictly and exactly this message and nothing else: "{fallback_text}"\n\n'
         "After answering, if there's likely more relevant detail in the context "
         "(pricing, specs, related items), briefly invite the user to ask — e.g. "
         "'Want to know about pricing or colors?' Skip this if the answer is already complete."
@@ -490,7 +423,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     answer = completion.choices[0].message.content
 
-    # Step 4: log the user's message
+    # Step 5: Save user message
     await db.execute(
         text("""
             INSERT INTO messages (session_id, tenant_id, sender, content)
@@ -499,7 +432,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
     )
 
-    # Step 5: log the bot's message, get its id
+    # Step 6: Save bot message
     bot_message_result = await db.execute(
         text("""
             INSERT INTO messages (session_id, tenant_id, sender, content)
@@ -510,34 +443,32 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # Step 6: log which chunks contributed to this answer
+    # Step 7: Save sources using individual execution calls
     sources = []
     if retrieved_chunks:
-        source_rows = [
-            {
-                "message_id": bot_message_id,
-                "chunk_id": chunk["chunk_id"],
-                "relevance_score": 1 / (1 + chunk["distance"]),  # convert distance to a 0-1 relevance score
-            }
-            for chunk in retrieved_chunks
-        ]
-        await db.execute(
-            text("""
-                INSERT INTO message_sources (message_id, chunk_id, relevance_score)
-                VALUES (:message_id, :chunk_id, :relevance_score)
-            """),
-            source_rows,
-        )
+        for chunk in retrieved_chunks:
+            relevance = 1 / (1 + chunk["distance"])
+            await db.execute(
+                text("""
+                    INSERT INTO message_sources (message_id, chunk_id, relevance_score)
+                    VALUES (:message_id, :chunk_id, :relevance_score)
+                """),
+                {
+                    "message_id": bot_message_id,
+                    "chunk_id": chunk["chunk_id"],
+                    "relevance_score": relevance,
+                },
+            )
+            sources.append(
+                ChatSource(chunk_id=str(chunk["chunk_id"]), relevance_score=relevance)
+            )
 
-    await db.commit()  # <--- ADD THIS LINE HERE
+    await db.commit()
 
     return ChatResponse(
         session_id=str(session_id),
         answer=answer,
-        sources=[
-            ChatSource(chunk_id=str(row["chunk_id"]), relevance_score=1 / (1 + row["distance"]))
-            for row in retrieved_chunks
-        ]
+        sources=sources,
     )
 
 class WebsiteDomainUpdate(BaseModel):

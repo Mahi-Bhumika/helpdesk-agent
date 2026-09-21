@@ -155,34 +155,35 @@ async def db_check(db: AsyncSession = Depends(get_db)):
 # --- Pydantic model matching the tenants table ---
 class TenantCreate(BaseModel):
     owner_id: str
-    owner_email: str          # ← new
+    owner_email: str
     company_name: str
     type_of_business: Optional[str] = None
     subscription_plan: Optional[str] = None
     bot_name: Optional[str] = None
     greeting_message: Optional[str] = None
     theme_color: Optional[str] = None
+    fallback_message: Optional[str] = None  # <--- MISSING HERE
 
 @app.get("/tenants/{tenant_id}/widget-config")
 async def get_widget_config(tenant_id: str, db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(f"widget-config:{tenant_id}", max_requests=60, window_seconds=60.0)
 
+    # UPDATE THIS QUERY:
     result = await db.execute(
         text("""
-            SELECT bot_name, greeting_message, theme_color
+            SELECT bot_name, greeting_message, theme_color, fallback_message
             FROM tenants
             WHERE tenant_id = :tenant_id
         """),
         {"tenant_id": tenant_id},
     )
     tenant = result.fetchone()
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="Tenant not found")
 
     return {
         "bot_name": tenant.bot_name,
         "greeting_message": tenant.greeting_message,
         "theme_color": tenant.theme_color,
+        "fallback_message": tenant.fallback_message,  # <--- MISSING HERE
     }
 
 @app.post("/tenants")
@@ -195,10 +196,16 @@ async def create_tenant(
         raise HTTPException(status_code=403, detail="owner_id does not match authenticated user")
 
     tenant_query = text("""
-        INSERT INTO tenants (company_name, type_of_business, subscription_plan, bot_name, greeting_message, theme_color)
-        VALUES (:company_name, :type_of_business, :subscription_plan, :bot_name, :greeting_message, :theme_color)
-        RETURNING tenant_id, company_name, invite_token, created_at
-    """)
+    INSERT INTO tenants (
+        company_name, type_of_business, subscription_plan, 
+        bot_name, greeting_message, theme_color, fallback_message  -- <--- MISSING HERE
+    )
+    VALUES (
+        :company_name, :type_of_business, :subscription_plan, 
+        :bot_name, :greeting_message, :theme_color, :fallback_message -- <--- MISSING HERE
+    )
+    RETURNING tenant_id, company_name, invite_token, created_at
+""")
     tenant_data = tenant.model_dump(exclude={"owner_id", "owner_email"})
     result = await db.execute(tenant_query, tenant_data)
     new_tenant = result.fetchone()

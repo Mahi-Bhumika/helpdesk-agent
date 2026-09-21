@@ -435,7 +435,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: embed the query and retrieve relevant chunks
+    # Filter out chunks with cosine/l2 distance higher than threshold (e.g., 0.6)
+    SIMILARITY_THRESHOLD = 0.60
+
+    retrieved_chunks = [
+        dict(row._mapping) for row in rows 
+        if row.distance <= SIMILARITY_THRESHOLD
+    ]
+
+    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
+        # Step 2: embed the query and retrieve relevant chunks
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
@@ -455,17 +464,17 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # Step 3: build context and call the LLM
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks)
+    fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
     system_prompt = (
         "You are a helpful, friendly support assistant answering questions based only on the "
         "provided context. Default to 2-4 short sentences, plain conversational language, no "
-        "headers or bullet lists. "
+        "headers or bullet lists.\n\n"
         "Exception: if the question genuinely asks for a process, steps, or how to do something "
         "(e.g. 'how do I reset my password'), you may use a short numbered list instead — but "
         "keep each step to one short line, and skip the numbered list entirely if the answer is "
-        "naturally just one or two sentences. "
-        "If the answer isn't in the context, respond with exactly this message: \"{tenant.fallback_message or 'Sorry, I don\\'t have an answer for that — try rephrasing or contact support.'}\" "
-        "Do not make up information beyond what's given."        "and suggest they contact support directly. Do not make up information beyond what's given."
+        "naturally just one or two sentences.\n\n"
+        f'If the answer isn\'t in the context, respond with strictly and exactly this message and nothing else: "{fallback_text}"\n\n'
         "After answering, if there's likely more relevant detail in the context "
         "(pricing, specs, related items), briefly invite the user to ask — e.g. "
         "'Want to know about pricing or colors?' Skip this if the answer is already complete."
@@ -519,14 +528,17 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
             """),
             source_rows,
         )
-        sources = [
+
+    await db.commit()  # <--- ADD THIS LINE HERE
+
+    return ChatResponse(
+        session_id=str(session_id),
+        answer=answer,
+        sources=[
             ChatSource(chunk_id=str(row["chunk_id"]), relevance_score=1 / (1 + row["distance"]))
             for row in retrieved_chunks
         ]
-
-    await db.commit()
-
-    return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
+    )
 
 class WebsiteDomainUpdate(BaseModel):
     website_domain: str

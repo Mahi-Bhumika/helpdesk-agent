@@ -353,7 +353,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     enforce_chat_rate_limit(query.tenant_id)
 
     tenant_row = await db.execute(
-        text("SELECT website_domain FROM tenants WHERE tenant_id = :tid"),
+        text("SELECT website_domain, fallback_message FROM tenants WHERE tenant_id = :tid"),
         {"tid": query.tenant_id},
     )
     tenant = tenant_row.fetchone()
@@ -457,8 +457,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         "(e.g. 'how do I reset my password'), you may use a short numbered list instead — but "
         "keep each step to one short line, and skip the numbered list entirely if the answer is "
         "naturally just one or two sentences. "
-        "If the answer isn't in the context, say briefly that you don't have that information "
-        "and suggest they contact support directly. Do not make up information beyond what's given."
+        "If the answer isn't in the context, respond with exactly this message: \"{tenant.fallback_message or 'Sorry, I don\\'t have an answer for that — try rephrasing or contact support.'}\" "
+        "Do not make up information beyond what's given."        "and suggest they contact support directly. Do not make up information beyond what's given."
         "After answering, if there's likely more relevant detail in the context "
         "(pricing, specs, related items), briefly invite the user to ask — e.g. "
         "'Want to know about pricing or colors?' Skip this if the answer is already complete."

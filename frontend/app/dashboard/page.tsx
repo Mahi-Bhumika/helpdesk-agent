@@ -20,6 +20,12 @@ interface RecentSession {
   message_count: number;
 }
 
+function normalizeUrl(domain: string): string {
+  return domain.startsWith("http://") || domain.startsWith("https://")
+    ? domain
+    : `https://${domain}`;
+}
+
 function LivePill() {
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-status-activeSoft text-status-active">
@@ -150,7 +156,7 @@ export default function DashboardOverviewPage() {
 
           {websiteDomain && (
             
-             <a href={`https://${websiteDomain}`}
+             <a href={normalizeUrl(websiteDomain)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium bg-gradient-brand text-white shadow-glow hover:brightness-110 transition-all"

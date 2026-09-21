@@ -245,10 +245,6 @@ async def upload_document(
         chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
         print(f"chunk_text took {time.time() - t1:.2f}s")
 
-        t1 = time.time()
-        chunks = await asyncio.to_thread(chunk_text, extracted_text, chunk_size=250, overlap=40)
-        print(f"chunk_text took {time.time() - t1:.2f}s")
-
         if len(chunks) > MAX_CHUNKS_PER_UPLOAD:
             await db.execute(
                 text("""
@@ -268,9 +264,6 @@ async def upload_document(
                 ),
             )
 
-        t2 = time.time()
-        embeddings = await asyncio.to_thread(embed_chunks, chunks)
-        print(f"embed_chunks took {time.time() - t2:.2f}s")
         t2 = time.time()
         embeddings = await asyncio.to_thread(embed_chunks, chunks)
         print(f"embed_chunks took {time.time() - t2:.2f}s")

@@ -1,71 +1,43 @@
 (function () {
   "use strict";
 
-  function fetchLiveSettings(config) {
-  var controller = new AbortController();
-  var timeoutId = setTimeout(function () { controller.abort(); }, 8000); // don't hang the widget forever if the backend's slow/down
+  function fetchLiveSettingsOnce(config, timeoutMs) {
+    var controller = new AbortController();
+    var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
 
-  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
-    method: "GET",
-    mode: "cors",
-    signal: controller.signal,
-  })
-    .then(function (res) {
-      clearTimeout(timeoutId);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
+    return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
+      method: "GET",
+      mode: "cors",
+      signal: controller.signal,
     })
-    .finally(function () {
-      clearTimeout(timeoutId);
+      .then(function (res) {
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .finally(function () {
+        clearTimeout(timeoutId);
+      });
+  }
+
+  function fetchLiveSettings(config, attempt) {
+    attempt = attempt || 1;
+    var MAX_ATTEMPTS = 4;
+
+    return fetchLiveSettingsOnce(config, 8000).catch(function (err) {
+      if (attempt >= MAX_ATTEMPTS) {
+        console.warn(
+          "[HIKA Widget] widget-config failed after " + MAX_ATTEMPTS + " attempts, using embed snippet defaults.",
+          err
+        );
+        throw err;
+      }
+      console.warn("[HIKA Widget] widget-config attempt " + attempt + " failed, retrying.", err);
+      return fetchLiveSettings(config, attempt + 1);
     });
-}
-
-  function init() {
-  var scriptTag = document.currentScript || document.querySelector("script[data-tenant-id]");
-
-  if (!scriptTag) {
-    console.error("[HIKA Widget] Could not locate its own <script> tag.");
-    return;
-  }
-
-  var config = {
-    tenantId: scriptTag.getAttribute("data-tenant-id"),
-    botName: scriptTag.getAttribute("data-name") || "Chat",
-    apiUrl: scriptTag.getAttribute("data-api-url") || "",
-    color: scriptTag.getAttribute("data-color") || "#5B5BF0",
-    position: scriptTag.getAttribute("data-position") || "bottom-right",
-    greeting: scriptTag.getAttribute("data-greeting") || "Hi! How can I help you today?",
-  };
-
-  if (!config.tenantId) {
-    console.error("[HIKA Widget] Missing required data-tenant-id attribute — widget not mounted.");
-    return;
-  }
-  if (!config.apiUrl) {
-    console.error("[HIKA Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail.");
-    mountWidget(config); // no apiUrl means no live-settings call is possible either — mount with embed-snippet defaults
-    return;
-  }
-
-  fetchLiveSettings(config)
-  .then(function (live) {
-    if (live && live.theme_color) config.color = live.theme_color;
-    if (live && live.greeting_message) config.greeting = live.greeting_message;
-    if (live && live.bot_name) config.botName = live.bot_name;   // ← add this
-  })
-  .catch(function (err) {
-    console.warn("[HIKA Widget] Could not fetch live settings, using embed snippet defaults.", err);
-  })
-  .finally(function () {
-    mountWidget(config);
-  });
   }
 
   function mountWidget(config) {
-    // Shadow DOM host: a plain, unstyled element sitting in the host
-    // page's light DOM. Everything visual lives inside its shadow
-    // tree, which the host page's CSS cannot select into, and whose
-    // CSS cannot leak back out onto the host page.
     var host = document.createElement("div");
     var shadow = host.attachShadow({ mode: "open" });
     document.body.appendChild(host);
@@ -116,10 +88,6 @@
       return hours + ":" + minStr + " " + ampm;
     }
 
-    // sender is "bot" or "user" — only ever used to pick a CSS class.
-    // Text always goes through textContent, never innerHTML, so a
-    // visitor's typed message (or a bot answer) can never be parsed
-    // as HTML/script.
     function appendMessage(text, sender) {
       var wrap = document.createElement("div");
       wrap.className = "HIKA-msg-wrap HIKA-msg-wrap-" + sender;
@@ -168,6 +136,7 @@
       }
       inputEl.focus();
     }
+
     function closePanel() {
       panel.hidden = true;
       bubble.setAttribute("aria-expanded", "false");
@@ -194,11 +163,7 @@
 
       fetch(config.apiUrl + "/chat", {
         method: "POST",
-        mode: "cors", // explicit for clarity — this IS a cross-origin
-                       // request (tenant site → your API's domain).
-                       // Browsers default to "cors" automatically for
-                       // cross-origin fetch, but stating it makes the
-                       // intent obvious to anyone reading this later.
+        mode: "cors",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           tenant_id: config.tenantId,
@@ -222,18 +187,8 @@
           );
         })
         .catch(function (err) {
-          // Browsers deliberately don't tell JS *why* a fetch failed —
-          // "Failed to fetch" / TypeError covers network-down, DNS
-          // failure, AND a CORS block, all identically. This isn't a
-          // bug in this code; it's a browser security choice (leaking
-          // the real reason could itself expose info to malicious
-          // scripts). Logging the target URL is the most useful thing
-          // this file itself can do — the real answer lives in the
-          // Network tab, not the console.
           console.error(
-            "[HIKA Widget] /chat request failed. If this is a CORS " +
-              "error, it'll say so explicitly in the Network tab response " +
-              "headers, not here. Target was: " + config.apiUrl + "/chat",
+            "[HIKA Widget] /chat request failed. Target was: " + config.apiUrl + "/chat",
             err
           );
           typingEl.remove();
@@ -257,9 +212,51 @@
       if (e.key === "Enter") handleSend();
     });
 
-    // Exposed on the light-DOM window for host-page integrations
-    // (e.g. a "Chat with us" link elsewhere on the tenant's page).
     window.__botaiWidget = { config: config, open: openPanel, close: closePanel };
+  }
+
+  function init() {
+    var scriptTag = document.currentScript || document.querySelector("script[data-tenant-id]");
+
+    if (!scriptTag) {
+      console.error("[HIKA Widget] Could not locate its own <script> tag.");
+      return;
+    }
+
+    var config = {
+      tenantId: scriptTag.getAttribute("data-tenant-id"),
+      botName: scriptTag.getAttribute("data-name") || "Chat",
+      apiUrl: scriptTag.getAttribute("data-api-url") || "",
+      color: scriptTag.getAttribute("data-color") || "#5B5BF0",
+      position: scriptTag.getAttribute("data-position") || "bottom-right",
+      greeting: scriptTag.getAttribute("data-greeting") || "Hi! How can I help you today?",
+    };
+
+    if (!config.tenantId) {
+      console.error("[HIKA Widget] Missing required data-tenant-id attribute — widget not mounted.");
+      return;
+    }
+    if (!config.apiUrl) {
+      console.error("[HIKA Widget] Missing data-api-url attribute — widget will mount but /chat calls will fail.");
+      mountWidget(config);
+      return;
+    }
+
+    fetchLiveSettings(config)
+      .then(function (remoteSettings) {
+        if (remoteSettings) {
+          config.botName = remoteSettings.bot_name || config.botName;
+          config.color = remoteSettings.color || config.color;
+          config.position = remoteSettings.position || config.position;
+          config.greeting = remoteSettings.greeting || config.greeting;
+        }
+      })
+      .catch(function () {
+        // Fallback already logged in fetchLiveSettings; continue mounting with local script config
+      })
+      .finally(function () {
+        mountWidget(config);
+      });
   }
 
   function bubbleIcon() {
@@ -291,15 +288,7 @@
 
   function buildCSS(config) {
     return (
-      // Load Inter for the widget specifically — this is a small, one-time
-      // request scoped to inside the Shadow DOM style tag, it does not
-      // touch or depend on the host page's own fonts/CSS at all.
       "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');" +
-      // :host resets inherited properties (font, color, line-height,
-      // etc.) that would otherwise cascade in from the host page's
-      // <body>/<html> rules, even though Shadow DOM blocks rule
-      // *matching* from crossing the boundary. This is what makes the
-      // widget survive a page with aggressive global CSS.
       ":host{all:initial;}" +
       ".HIKA-widget-root{position:fixed;z-index:2147483000;" +
       "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;}" +

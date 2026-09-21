@@ -298,6 +298,21 @@ async def upload_document(
 
 import re
 
+from urllib.parse import urlparse
+
+def extract_origin(url_or_domain: str) -> str:
+    """
+    Normalizes whatever got saved in website_domain — a bare domain,
+    a full URL, or a URL with a path — down to just scheme://host,
+    matching the exact format browsers send in the Origin header.
+    """
+    if not url_or_domain:
+        return ""
+    if not url_or_domain.startswith(("http://", "https://")):
+        url_or_domain = "https://" + url_or_domain
+    parsed = urlparse(url_or_domain)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
 _GREETING_PATTERNS = re.compile(
     r"^\s*(hi|hii+|hey|hello|yo|sup|good\s?(morning|afternoon|evening)|howdy|hola)\s*[!.?]*\s*$",
     re.IGNORECASE,
@@ -344,7 +359,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     tenant = tenant_row.fetchone()
     if not tenant or not tenant.website_domain:
         raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
-    if not origin or tenant.website_domain not in origin:
+    if not origin or extract_origin(tenant.website_domain) != origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
 
     # Small-talk short-circuit: skip retrieval for greetings

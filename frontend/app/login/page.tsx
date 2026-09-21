@@ -87,7 +87,7 @@ export default function LoginPage() {
             } else if (existingUser.role === "owner") {
                 router.push("/dashboard");
             } else {
-                router.push("/dashboard/member");
+                router.push("/dashboard");
             }
         }
         

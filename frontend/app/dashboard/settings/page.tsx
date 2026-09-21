@@ -7,19 +7,31 @@ import { authedFetch } from "@/lib/api";
 import GlassCard from "@/components/GlassCard";
 import Button from "@/components/Button";
 
+type TenantSettings = {
+    bot_name: string;
+    greeting_message: string;
+    theme_color: string;
+    fallback_message: string;
+};
+
 export default function SettingsPage() {
     const { tenantId } = useAuth();
-    const [botName, setBotName] = useState("");
-    const [greetingMessage, setGreetingMessage] = useState("");
-    const [themeColor, setThemeColor] = useState("#7C3AED");
-    const [websiteDomain, setWebsiteDomain] = useState("");
 
+    const [saved, setSavedSettings] = useState<TenantSettings>({
+        bot_name: "",
+        greeting_message: "",
+        theme_color: "#7C3AED",
+        fallback_message: "",
+    });
+    const [draft, setDraft] = useState<TenantSettings>(saved);
+    const [isEditing, setIsEditing] = useState(false);
+
+    const [websiteDomain, setWebsiteDomain] = useState("");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    const [saved, setSaved] = useState(false);
+    const [justSaved, setJustSaved] = useState(false);
     const [savingDomain, setSavingDomain] = useState(false);
     const [domainSaved, setDomainSaved] = useState(false);
-    const [fallbackMessage, setFallbackMessage] = useState("");
 
     useEffect(() => {
         async function fetchTenant() {
@@ -31,11 +43,15 @@ export default function SettingsPage() {
                 .single();
 
             if (!error && data) {
-                setBotName(data.bot_name ?? "");
-                setGreetingMessage(data.greeting_message ?? "");
-                setThemeColor(data.theme_color ?? "#7C3AED");
+                const loaded = {
+                    bot_name: data.bot_name ?? "",
+                    greeting_message: data.greeting_message ?? "",
+                    theme_color: data.theme_color ?? "#7C3AED",
+                    fallback_message: data.fallback_message ?? "",
+                };
+                setSavedSettings(loaded);
+                setDraft(loaded);
                 setWebsiteDomain(data.website_domain ?? "");
-                setFallbackMessage(data.fallback_message ?? "");
             }
             setLoading(false);
         }
@@ -46,20 +62,24 @@ export default function SettingsPage() {
         e.preventDefault();
         if (!tenantId) return;
         setSaving(true);
-        setSaved(false);
+        setJustSaved(false);
 
         const { error } = await supabase
             .from("tenants")
-            .update({
-                bot_name: botName,
-                greeting_message: greetingMessage,
-                theme_color: themeColor,
-                fallback_message: fallbackMessage,
-            })
+            .update(draft)
             .eq("tenant_id", tenantId);
 
         setSaving(false);
-        if (!error) setSaved(true);
+        if (!error) {
+            setSavedSettings(draft);
+            setJustSaved(true);
+            setIsEditing(false);
+        }
+    };
+
+    const handleCancel = () => {
+        setDraft(saved); // discard unsaved edits
+        setIsEditing(false);
     };
 
     const handleSaveWebsiteDomain = async () => {
@@ -90,49 +110,84 @@ export default function SettingsPage() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="flex flex-col gap-6">
                     <GlassCard padding="lg">
-                        <form onSubmit={handleSave} className="flex flex-col gap-4">
-                            <label className="flex flex-col gap-1.5">
-                                <span className="text-sm text-text-secondary">Bot name</span>
-                                <input
-                                    type="text"
-                                    value={botName}
-                                    onChange={(e) => setBotName(e.target.value)}
-                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
-                                />
-                            </label>
-                            <label className="flex flex-col gap-1.5">
-                                <span className="text-sm text-text-secondary">Greeting message</span>
-                                <textarea
-                                    value={greetingMessage}
-                                    onChange={(e) => setGreetingMessage(e.target.value)}
-                                    rows={3}
-                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
-                                />
-                            </label>
-                            <label className="flex flex-col gap-1.5">
-                                <span className="text-sm text-text-secondary">Fallback message</span>
-                                <textarea
-                                    value={fallbackMessage}
-                                    onChange={(e) => setFallbackMessage(e.target.value)}
-                                    rows={2}
-                                    placeholder="Sorry, I don't have an answer for that — try rephrasing or contact support."
-                                    className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
-                                />
-                            </label>
-                            <label className="flex flex-col gap-1.5">
-                                <span className="text-sm text-text-secondary">Theme color</span>
-                                <input
-                                    type="color"
-                                    value={themeColor}
-                                    onChange={(e) => setThemeColor(e.target.value)}
-                                    className="h-10 w-20 rounded-lg border border-white/[0.1] bg-transparent"
-                                />
-                            </label>
-                            <Button type="submit" disabled={saving}>
-                                {saving ? "Saving..." : "Save changes"}
-                            </Button>
-                            {saved && <p className="text-sm text-status-active">Saved ✓</p>}
-                        </form>
+                        {!isEditing ? (
+                            <div className="flex flex-col gap-4">
+                                <div>
+                                    <span className="text-sm text-text-secondary">Bot name</span>
+                                    <p className="text-text-primary mt-0.5">{saved.bot_name || "—"}</p>
+                                </div>
+                                <div>
+                                    <span className="text-sm text-text-secondary">Greeting message</span>
+                                    <p className="text-text-primary mt-0.5">{saved.greeting_message || "—"}</p>
+                                </div>
+                                <div>
+                                    <span className="text-sm text-text-secondary">Fallback message</span>
+                                    <p className="text-text-primary mt-0.5">{saved.fallback_message || "—"}</p>
+                                </div>
+                                <div>
+                                    <span className="text-sm text-text-secondary">Theme color</span>
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span
+                                            className="h-6 w-6 rounded-full border border-white/[0.15]"
+                                            style={{ backgroundColor: saved.theme_color }}
+                                        />
+                                        <span className="text-text-primary text-sm">{saved.theme_color}</span>
+                                    </div>
+                                </div>
+                                <Button onClick={() => setIsEditing(true)} className="w-fit">
+                                    Edit
+                                </Button>
+                                {justSaved && <p className="text-sm text-status-active">Saved ✓</p>}
+                            </div>
+                        ) : (
+                            <form onSubmit={handleSave} className="flex flex-col gap-4">
+                                <label className="flex flex-col gap-1.5">
+                                    <span className="text-sm text-text-secondary">Bot name</span>
+                                    <input
+                                        type="text"
+                                        value={draft.bot_name}
+                                        onChange={(e) => setDraft({ ...draft, bot_name: e.target.value })}
+                                        className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                    />
+                                </label>
+                                <label className="flex flex-col gap-1.5">
+                                    <span className="text-sm text-text-secondary">Greeting message</span>
+                                    <textarea
+                                        value={draft.greeting_message}
+                                        onChange={(e) => setDraft({ ...draft, greeting_message: e.target.value })}
+                                        rows={3}
+                                        className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                    />
+                                </label>
+                                <label className="flex flex-col gap-1.5">
+                                    <span className="text-sm text-text-secondary">Fallback message</span>
+                                    <textarea
+                                        value={draft.fallback_message}
+                                        onChange={(e) => setDraft({ ...draft, fallback_message: e.target.value })}
+                                        rows={2}
+                                        placeholder="Sorry, I don't have an answer for that — try rephrasing or contact support."
+                                        className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                                    />
+                                </label>
+                                <label className="flex flex-col gap-1.5">
+                                    <span className="text-sm text-text-secondary">Theme color</span>
+                                    <input
+                                        type="color"
+                                        value={draft.theme_color}
+                                        onChange={(e) => setDraft({ ...draft, theme_color: e.target.value })}
+                                        className="h-10 w-20 rounded-lg border border-white/[0.1] bg-transparent"
+                                    />
+                                </label>
+                                <div className="flex gap-2">
+                                    <Button type="submit" disabled={saving}>
+                                        {saving ? "Saving..." : "Save changes"}
+                                    </Button>
+                                    <Button type="button" variant="secondary" onClick={handleCancel} disabled={saving}>
+                                        Cancel
+                                    </Button>
+                                </div>
+                            </form>
+                        )}
                     </GlassCard>
 
                     <GlassCard padding="lg">
@@ -156,22 +211,21 @@ export default function SettingsPage() {
                     </GlassCard>
                 </div>
 
-                {/* Live widget preview */}
                 <GlassCard padding="lg" className="h-fit">
                     <p className="text-sm text-text-secondary mb-4">Widget preview</p>
                     <div className="rounded-xl2 bg-obsidian-surface border border-white/[0.08] p-4 flex flex-col gap-3 h-80">
                         <div
                             className="self-start max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-white"
-                            style={{ backgroundColor: themeColor }}
+                            style={{ backgroundColor: isEditing ? draft.theme_color : saved.theme_color }}
                         >
-                            {greetingMessage || "Hi! How can I help you today?"}
+                            {(isEditing ? draft.greeting_message : saved.greeting_message) || "Hi! How can I help you today?"}
                         </div>
                         <div className="self-end max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-white/[0.08] text-text-primary">
                             What are your business hours?
                         </div>
                     </div>
                     <p className="text-xs text-text-muted mt-3 text-center">
-                        {botName || "Your bot"}'s greeting, shown as visitors will see it
+                        {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}'s greeting, shown as visitors will see it
                     </p>
                 </GlassCard>
             </div>

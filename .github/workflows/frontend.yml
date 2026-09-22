@@ -5,7 +5,8 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "frontend/**"   # only run if something in frontend/ actually changed
+      - "frontend/**"
+      - ".github/workflows/frontend.yml"   # only run if something in frontend/ actually changed
 
 jobs:
   lint-and-build:

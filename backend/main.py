@@ -401,7 +401,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     rows = result.fetchall()
 
     # Step 3: Filter chunks AFTER rows is populated
-    SIMILARITY_THRESHOLD = 0.60
+    SIMILARITY_THRESHOLD = 0.35
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
         if row.distance <= SIMILARITY_THRESHOLD

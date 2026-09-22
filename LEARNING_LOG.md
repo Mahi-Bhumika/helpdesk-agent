@@ -971,3 +971,103 @@ The `widget-config` request showing "cancelled," then immediately after showing 
 ## Where things stand heading into Week 6
 
 Full Week 5 scope closed: widget live-settings + autoscroll, category system, Sessions + Analytics + Declined pages all built and regression-tested, Accept/Decline race condition proven safe in both directions, two-tenant full flow and the cross-tenant attack script both clean on a fresh rerun. Carried forward, not mine: Bot Settings' double-submit bug and missing save-state, both handed to Mahi directly. 
+
+
+# Helpdesk Agent — Week 6 Learning Log (Mahi/ UI-UX + Bug Fixes)
+
+*Theme rollout (obsidian/glassmorphism), charts, widget polish, and a long real-world debugging chain*
+
+---
+
+## Summary
+
+Rolled out the new dark, glassmorphism theme (obsidian background, indigo-violet gradient accent, Inter font) across every dashboard page, added real charts to Analytics, rebuilt the Overview page from a bare button list into a real dashboard, redesigned the public landing page and the embeddable chat widget, and closed out a long chain of deploy/runtime bugs — several of them the exact same *class* of mistake seen in earlier weeks (duplicate code blocks from merged snippets, missing imports, stale builds) recurring in new files.
+
+---
+
+## Day 1 (Tue) — Design system foundation
+
+- Built shared theme: `tailwind.config.ts` (obsidian/indigo/violet tokens, status colors with glow shadows), `globals.css` (glass utility classes, Inter setup)
+- Built `GlassCard`, `MetricCard`, `Button` components
+- **Real bug, twice**: pasted `layout.tsx` and later the Analytics page as a second, duplicate block instead of merging into the existing file — same root-cause pattern as Week 1's duplicate-FastAPI-app bug, just in TSX this time. Fixed by rewriting each file as one clean merged version.
+- **Real bug**: project is on Tailwind v4, but the CSS handed over used v3 syntax (`@tailwind base/components/utilities`). Fixed with `@config "../tailwind.config.ts"; @import "tailwindcss";` — v4's actual syntax.
+- **Real bug**: a stray empty `tailwind.config.ts` got created inside `components/` by accident — didn't break anything itself, but caused confusion about which config was real. Deleted.
+
+## Day 2 (Wed) — Analytics charts
+
+- Built `SessionsOverTimeChart` and `MessagesVolumeChart` (recharts), grouping raw Supabase rows into daily buckets client-side — no new backend endpoint, consistent with the "live query, not a cached table" decision made at the start of the week
+- **Real bug**: `recharts` was referenced in code but never added to `package.json` — Vercel's clean build environment didn't have it. Same bug class as Week 2's `sentence_transformers` missing from `requirements.txt`. Fixed with `npm install recharts` + committing the updated lockfile.
+- **Real bug**: `ChartTooltip`'s TypeScript types didn't match the installed recharts version's actual `TooltipProps` shape. Fixed by defining a local, loose prop type instead of relying on recharts' export.
+
+## Day 3 (Thu) — Sessions list + transcript drill-in
+
+- Restyled the sessions list and the transcript drill-in page (glass cards, pill status badges, CSV export)
+- **Real design gap, not a bug**: `chat_sessions.end_datetime` was never being written anywhere in the whole pipeline — no close-widget event, no timeout job. Session status can't come from a column nobody populates. Solved by deriving status from *last message activity* (< 30 min = Ongoing) instead, and added `MAX(m.created_at) AS last_message_at` to the `/sessions` backend query to support it.
+
+## Day 4 (Fri) — Documents & Bot Settings
+
+- Restyled Documents page (status pills, dropzone glow state) and Bot Settings (added live widget preview, wired up the previously-broken website-domain save)
+- **Real bug**: the website-domain save handler was calling a raw `fetch()` with the wrong env var name (`NEXT_PUBLIC_BACKEND_URL` instead of the actually-configured `NEXT_PUBLIC_API_URL`) — same exact bug class already found and fixed once in Week 4. Fixed by routing it through the existing `authedFetch` helper instead of a second, inconsistent fetch path.
+
+## Day 5 (Sat) — Embed page, Invites/Admin, widget redesign
+
+- Restyled Embed Script and Invites/Admin pages
+- Widget (`widget.js`): added Inter font (loaded inside the Shadow DOM's own `<style>` tag), redesigned bubbles (gradient/shadow on bot vs. user bubbles), added per-message timestamps — all without touching the existing security model (Shadow DOM isolation, `textContent`-only rendering, abort-controller timeout)
+
+## Day 6 — Overview page rebuild + landing page
+
+- Rebuilt the Overview/Dashboard page from a bare row of buttons into a real hero + stat cards + quick actions + recent activity feed
+- Iterated based on feedback: removed a pointless sparkline strip, removed a broken `bot_name`-in-greeting concatenation ("Welcome back, hey peter")
+- Redesigned the public landing page: renamed to **HIKA** (Helpdesk Intelligence & Knowledge Automation), animated gradient orbs, mock chat preview, toned down an initial "generic AI landing page" look (oversized bold gradient headline, glow-everywhere) into something calmer, added a trademark/credits footer
+- **Real bug**: "Try your bot on your site" button produced `https://https://mahi-bhumika.github.io` (double protocol) because the stored `website_domain` value already included `https://`. Fixed with a small `normalizeUrl()` helper that only prepends the protocol if it's missing.
+
+## The long debugging chain (Sat–Sun) — website domain save → CORS → 500s → fallback message
+
+This was the single longest thread of the week and is worth logging as its own sequence, since each fix uncovered the next real problem rather than being one bug:
+
+1. **Website-domain save hung on "Saving..." forever** — `authedFetch` throws on failure with no `try/catch` around the call, so the error was swallowed silently. Fixed by wrapping the save in `try/catch/finally` and actually surfacing the error.
+2. **That surfaced a real CORS failure**: `PUT /tenants/website-domain` was being blocked because the backend's `CORSMiddleware` only listed `allow_methods=["GET", "POST"]` — `PUT` was never allowed. Fixed by adding `PUT`, `DELETE`.
+3. **Widget's `/chat` calls started 403ing** — the Origin-check logic compared `tenant.website_domain` against the browser's `Origin` header using a raw substring (`in`) check, which breaks the moment a stored domain includes a path (browsers' Origin header never has a path) — and was also a real spoofing gap (`"site.com" in "site.com.evil.com"` passes). Fixed with an `extract_origin()` helper that normalizes both sides to `scheme://host` before an exact match.
+4. **`/chat` started 500ing outright** — mid-refactor (adding a similarity threshold for retrieval), the entire tenant-fetching block got deleted from `/chat`, but a later line still referenced `tenant.fallback_message` → `NameError: name 'tenant' is not defined`. Fixed by restoring the tenant fetch (bundled together with the Origin check from point 3, since both need the same row).
+5. **Deploy failed entirely, nothing worked at all** — a new `EndChatRequest` Pydantic model used `Field(...)` without importing `Field` from `pydantic`, crashing the app at import time before the server could even start. This meant *every* test run during this window was against a server that had never successfully restarted. Fixed with one import.
+6. **Root cause of "fallback message not updating"**: found and fixed independently — the similarity filter introduced in point 4's refactor was comparing **cosine distance** values (where `0.0` = identical) against a threshold written as if it were a similarity score, silently discarding every genuinely relevant chunk and forcing the fallback message on nearly every real question. Fixed by converting the SQL to return true cosine similarity (`1 - (embedding <=> query_embedding)`) and correcting the Python threshold check and value to match.
+
+---
+
+## Day 7 (Sun, continued) — Small-talk routing, `/chat/end`, and the CSAT pipeline
+
+More independent work closing out real gaps identified earlier in the week (the "Ongoing forever" status bug, and the never-implemented CSAT flow flagged as far back as the Week 1 schema notes):
+
+- **Small-talk router**: greetings like "hii" were getting evaluated against the document vector store like real questions, scoring low (a greeting isn't in any uploaded PDF), landing in `NO_RELEVANT_CONTEXT_FOUND`, and firing the fallback message — technically correct given the data, but a bad user experience for the very first message in a conversation. Fixed with a `GREETINGS` check that short-circuits retrieval entirely for small talk, plus a system-prompt instruction allowing an ungrounded, conversational reply specifically for that case.
+- **Real bug**: a second `500` on `/chat`, unrelated to the earlier `tenant` `NameError` — the function signature took `query: ChatQuery` but the body referenced `payload.question`, a leftover variable name from an earlier version of the function that never got fully renamed. Fixed by aligning the body to the actual parameter name.
+- **Real bug**: `/chat/end`'s raw SQL compared session/tenant IDs without casting, which Postgres rejected as a type mismatch (`uuid` column vs. untyped parameter). Fixed with explicit `:sid::uuid` / `:tid::uuid` casts.
+- **Built the actual CSAT pipeline** that's been sitting as unused schema since Week 1: `/chat/end` now writes a 1–5 rating into `chat_sessions.customer_satisfaction` alongside `end_datetime` and a real status update — meaning `end_datetime` is *finally* a column something writes to, which also makes the earlier "derive status from last-activity" workaround (Day 3) a genuine stopgap rather than the permanent approach.
+- **Frontend**: extended the Sessions list page with date-range and minimum-CSAT filters, an aggregate CSAT banner (average score, total feedback count), and star indicators per row.
+
+---
+
+## Recurring lessons worth remembering (Week 6 additions)
+
+- **The exact same bug class shows up in new files if the underlying habit isn't fixed.** Duplicate-block-from-a-pasted-snippet (Week 1's FastAPI app, this week's `layout.tsx` and Analytics page) and wrong-env-var-name (Week 4's `/tenants` 404, this week's website-domain save) are both repeats — worth treating "did I merge or did I paste-append" and "does this env var name actually exist" as standing checks, not one-off fixes.
+- **A misleading error can send you down the wrong path entirely.** The `et.reportAllChanges` console error (Vercel Speed Insights) looked alarming but was unrelated noise every single time it appeared — worth learning to recognize and immediately discount it rather than re-investigating it each time.
+- **"It's stuck loading" can mean the page never rendered fresh at all**, not that the code is broken — a stale client-side route/render (URL changed, content didn't) cost real time before being identified; a full manual reload in a clean tab is a fast way to rule this out early instead of last.
+- **A failed deploy silently serves the last successful build.** Several rounds of "my fix isn't working" were actually testing against an old build, because a *different*, unrelated file had a syntax error blocking the deploy. Checking the Deployments tab status *before* re-testing a fix should be a standing habit, not a last resort.
+- **Distance and similarity are inverses — mixing them up doesn't error, it just silently returns wrong results.** The cosine-distance-vs-similarity threshold bug produced no crash, no error message — just a fallback message firing on valid questions. This is the same category of danger flagged back in Week 2 (MiniLM's silent 256-token truncation): the most dangerous bugs are the ones that fail quietly and look like they're "just being conservative," not the ones that crash loudly.
+- **Refactoring one part of a function can silently delete logic another part still depends on.** The missing `tenant` fetch wasn't a typo — it was a real block that existed, then got removed while adding unrelated retrieval-filtering logic, orphaning a line further down. Worth diffing carefully when refactoring a function that already has several responsibilities packed into it. The `payload`/`query` naming mismatch on the second `/chat` 500 was the same category of issue: a variable name left over from an earlier draft of the function.
+- **A workaround built earlier in the week can quietly become obsolete later in the same week.** The last-message-activity heuristic for session status (Day 3) was a reasonable stopgap when `end_datetime` was genuinely never written — but once `/chat/end` was built to actually write it, the heuristic became the *wrong* source of truth to keep reading from. Worth explicitly revisiting Day 3's status logic now that a real signal exists, rather than leaving both approaches half-in-place.
+- **A field sitting unused in the schema since Week 1 doesn't mean the feature works** — `customer_satisfaction` existed as a column for five weeks with nothing ever writing to it. Building the actual write path (`/chat/end`) is what turned it from a hypothetical field into a real, working feature.
+
+---
+
+## Where things stand heading into Week 7
+
+- Full theme rollout complete across every dashboard page, the landing page, and the widget
+- Analytics has real charts backed by live queries, no new infrastructure
+- The website-domain → Origin-check → widget-access chain is now correct and secure (exact-match, not substring)
+- The fallback-message feature works end-to-end: Bot Settings → Supabase → `/chat` prompt injection
+- Small talk (greetings) now gets a natural, ungrounded reply instead of tripping the fallback message
+- `chat_sessions.end_datetime` and `customer_satisfaction` are now genuinely written by `/chat/end` — the Day 3 "derive status from last activity" logic should be revisited/replaced with the real `end_datetime` value now that one exists
+- Sessions list has real CSAT filtering and an aggregate ratings banner
+- Retrieval quality bug (cosine distance vs. similarity confusion) found and fixed independently — worth a deliberate retest across a batch of real questions to confirm the new `0.40–0.45` threshold is well-tuned, not just "no longer completely broken"
+- `/kb/upload` had a duplicate-work bug (chunking and embedding each ran twice per upload) found and fixed mid-week — worth confirming this fix is still intact given how much `main.py` has been edited since
+- Next up per the roadmap: Week 7 is containerization (Docker), CI/CD (GitHub Actions), and getting `main` always deployable — the deploy-reliability lessons from this week's debugging chain (checking deploy status before retesting, catching import errors before they ship) are directly relevant heading into that work

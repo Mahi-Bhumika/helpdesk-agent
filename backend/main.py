@@ -400,16 +400,17 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     })
     rows = result.fetchall()
 
-    # Step 3: Filter chunks AFTER rows is populated
-    SIMILARITY_THRESHOLD = 0.35
+    # Step 3: Filter chunks using Similarity (1.0 = exact match)
+    # Lowering to 0.40–0.45 ensures short valid questions pass through safely
+    SIMILARITY_THRESHOLD = 0.40
+
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
-        if row.distance <= SIMILARITY_THRESHOLD
+        if getattr(row, "relevance_score", 1 - row.distance) >= SIMILARITY_THRESHOLD
     ]
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
-
     # Step 4: Prompt and LLM completion
     system_prompt = (
         "You are a helpful, friendly support assistant answering questions based only on the "

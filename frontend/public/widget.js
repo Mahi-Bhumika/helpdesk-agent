@@ -193,7 +193,7 @@
           );
           typingEl.remove();
           appendMessage(
-            "Sorry, something went wrong reaching the server. Please try again.",
+            config.fallbackMessage || "Sorry, something went wrong reaching the server. Please try again.",
             "bot"
           );
         })
@@ -246,9 +246,9 @@
       .then(function (remoteSettings) {
         if (remoteSettings) {
           config.botName = remoteSettings.bot_name || config.botName;
-          config.color = remoteSettings.color || config.color;
-          config.position = remoteSettings.position || config.position;
-          config.greeting = remoteSettings.greeting || config.greeting;
+          config.color = remoteSettings.theme_color || config.color;
+          config.greeting = remoteSettings.greeting_message|| config.greeting;
+          config.fallbackMessage = remoteSettings.fallback_message || null;
         }
       })
       .catch(function () {

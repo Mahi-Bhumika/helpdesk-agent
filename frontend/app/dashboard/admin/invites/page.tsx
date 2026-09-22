@@ -172,21 +172,21 @@ export default function InvitesAdminPage() {
                   </td>
                   <td className="px-6 py-4 flex items-center gap-2">
                     <div className="flex items-center gap-2">
-                    {/* Accept Button - Primary Purple/Indigo */}
-                    <button
-                        type="button"
-                        className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors outline-none border-0"
-                    >
-                        Accept
-                    </button>
+                        {/* Accept Button - Primary Purple */}
+                        <button
+                            type="button"
+                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors outline-none border-0"
+                        >
+                            Accept
+                        </button>
 
-                    {/* Decline Button - Neutral Dark Slate (No Blue/Purple, No Red Border, Same Shape) */}
-                    <button
-                        type="button"
-                        className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-gray-200 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-colors outline-none"
-                    >
-                        Decline
-                    </button>
+                        {/* Decline Button - Red Border & Red Text */}
+                        <button
+                            type="button"
+                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-red-500 hover:text-red-400 bg-transparent hover:bg-red-500/10 border border-red-500/60 hover:border-red-500 rounded-xl transition-colors outline-none"
+                        >
+                            Decline
+                        </button>
                     </div>
                   </td>
                 </tr>

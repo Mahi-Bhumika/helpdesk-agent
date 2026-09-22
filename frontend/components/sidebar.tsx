@@ -15,11 +15,7 @@ export default function Sidebar({ isOwner, footer }: SidebarProps) {
 
   return (
     <aside className="flex h-screen w-64 flex-col bg-[#0B0B0C] border-r border-white/10 px-4 py-6">
-      <div className="mb-8 px-2">
-        <span className="text-lg font-semibold text-white font-[Inter]">HIKA</span>
-      </div>
-
-      <nav className="flex flex-col gap-1">
+      <nav className="flex flex-col gap-1 mt-14">
         {visibleItems.map(({ label, href, icon: Icon }) => {
           const isActive =
             href === "/dashboard"

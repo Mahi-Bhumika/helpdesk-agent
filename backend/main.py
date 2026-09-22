@@ -371,12 +371,23 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
     
     # Step 1: Create session if missing
+# Step 1: Ensure session exists or create a new one
     session_id = query.session_id
-    if session_id is None:
+
+    if session_id:
+        # Check if session exists in DB
+        existing_session = await db.execute(
+            text("SELECT session_id FROM chat_sessions WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid"),
+            {"sid": session_id, "tid": query.tenant_id}
+        )
+        if not existing_session.fetchone():
+            session_id = None  # Force creation of a valid session if not found
+
+    if not session_id:
         session_result = await db.execute(
             text("""
                 INSERT INTO chat_sessions (tenant_id)
-                VALUES (:tenant_id)
+                VALUES (:tenant_id::uuid)
                 RETURNING session_id
             """),
             {"tenant_id": query.tenant_id},

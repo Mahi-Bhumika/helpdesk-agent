@@ -180,12 +180,12 @@ export default function InvitesAdminPage() {
                       Accept
                     </Button>
                     <Button
-                      size="sm"
-                      disabled={actioningId === u.user_id}
-                      onClick={() => handleDecision(u.user_id, "decline")}
-                      className="bg-transparent hover:bg-red-500/10 text-neutral-400 hover:text-red-400 border border-white/10 hover:border-red-500/30 transition-colors"
-                    >
-                      Decline
+                        size="sm"
+                        disabled={actioningId === u.user_id}
+                        onClick={() => handleDecision(u.user_id, "decline")}
+                        className="bg-red-950/30 hover:bg-red-900/40 text-red-400 border border-red-800/60 transition-colors"
+                        >
+                        Decline
                     </Button>
                   </td>
                 </tr>

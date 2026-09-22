@@ -7,7 +7,6 @@ import os as os_module  # avoid clashing with your existing `os` usage if any
 import time
 
 
-from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -27,7 +26,7 @@ import asyncio
 
 from auth import get_current_user, decode_jwt
 
-
+from fastapi import FastAPI, HTTPException, Depends, Header, Query
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
@@ -353,10 +352,11 @@ class ChatResponse(BaseModel):
     session_id: str
     answer: str
     sources: list[ChatSource]
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
+
+    top_k = min(query.top_k, 10)  # cap to prevent an oversized retrieval query
 
     # Fetch tenant config with required fields
     tenant_row = await db.execute(
@@ -368,18 +368,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
     if not origin or extract_origin(tenant.website_domain) != origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
-    
+
     # Step 1: Ensure session exists or create a new one
     session_id = query.session_id
-
     if session_id:
-        # Check if session exists in DB
         existing_session = await db.execute(
             text("SELECT session_id FROM chat_sessions WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)"),
             {"sid": session_id, "tid": query.tenant_id}
         )
         if not existing_session.fetchone():
-            session_id = None  # Reset to create a new session if not found
+            session_id = None
 
     if not session_id:
         session_result = await db.execute(
@@ -392,7 +390,25 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Fetch last 6 messages from conversation history for memory
+    # Step 2: Greeting check — BEFORE retrieval, so a "hi" never pays for
+    # an embedding call or a vector search. Uses is_smalltalk() (regex,
+    # handles punctuation) instead of an exact-match set.
+    if is_smalltalk(query.question):
+        greeting_msg = tenant.greeting_message or "Hello! How can I help you today?"
+
+        await db.execute(
+            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+        )
+        await db.execute(
+            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
+        )
+        await db.commit()
+
+        return ChatResponse(session_id=str(session_id), answer=greeting_msg, sources=[])
+
+    # Step 3: Fetch last 6 messages from conversation history for memory
     history_result = await db.execute(
         text("""
             SELECT sender, content 
@@ -403,10 +419,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         """),
         {"session_id": session_id}
     )
-    # Reverse to keep chronological order (oldest to newest)
     history_rows = list(reversed(history_result.fetchall()))
 
-    # Step 3: Query vector store using Cosine Distance operator (<=>)
+    # Step 4: Query vector store using Cosine Distance operator (<=>)
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
@@ -419,13 +434,12 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     result = await db.execute(search_query, {
         "query_embedding": str(query_embedding),
         "tenant_id": query.tenant_id,
-        "top_k": query.top_k,
+        "top_k": top_k,
     })
     rows = result.fetchall()
 
-    # Step 4: Filter chunks using Similarity Threshold
+    # Step 5: Filter chunks using Similarity Threshold
     SIMILARITY_THRESHOLD = 0.40
-
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
         if (1 - row.distance) >= SIMILARITY_THRESHOLD
@@ -434,42 +448,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
-    # Step 5: Greeting Interceptor
-    GREETINGS = {
-        "hi", "hii", "hiii", "hiiii", "hello", "helloo", "hey", "heyy", "heyyy",
-        "heyya", "yo", "yoo", "sup", "whats up", "what's up", "wbu", "wyd",
-        "good morning", "good afternoon", "good evening", "good day", "greetings",
-        "howdy", "hiya", "hola", "bonjour", "namaste", "salutations",
-        "are you there", "anyone there", "anyone here", "is anyone there",
-        "how are you", "how are you doing", "hows it going", "how's it going",
-        "how are things", "what can you do", "who are you", "what is your name",
-        "help", "can you help me", "i need help", "start", "menu"
-    }
-    user_message = query.question.strip().lower()
-
-    if user_message in GREETINGS:
-        greeting_msg = getattr(tenant, "greeting_message", None) or "Hello! How can I help you today?"
-        
-        # Save greeting messages to DB so history remains intact
-        await db.execute(
-            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
-        )
-        await db.execute(
-            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
-        )
-        await db.commit()
-
-        return ChatResponse(
-            session_id=str(session_id),
-            answer=greeting_msg,
-            sources=[]
-        )
-    
-    # Step 6: Construct LLM Messages with Conversation Memory
+    # Step 6: Construct LLM messages with conversation memory
     system_prompt = (
-        f"You are {getattr(tenant, 'bot_name', None) or 'a helpful AI assistant'}. "
+        f"You are {tenant.bot_name or 'a helpful AI assistant'}. "
         "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
         "RULES:\n"
         "1. CONVERSATION CONTEXT: Use previous conversation history to understand follow-up commands or references (e.g., 'gimme list', 'tell me more', 'why').\n"
@@ -478,13 +459,10 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
 
     llm_messages = [{"role": "system", "content": system_prompt}]
-
-    # Append historic turns into prompt context
     for h in history_rows:
         role = "user" if h.sender == "user" else "assistant"
         llm_messages.append({"role": role, "content": h.content})
 
-    # Append current user query + retrieved context
     user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
     llm_messages.append({"role": "user", "content": user_prompt})
 
@@ -506,24 +484,32 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # Step 8: Save source references
+    # Step 8: Save source references — batched in one call instead of one per chunk
     sources = []
     if retrieved_chunks:
-        for chunk in retrieved_chunks:
-            relevance = 1 - chunk["distance"]
-            await db.execute(
-                text("INSERT INTO message_sources (message_id, chunk_id, relevance_score) VALUES (:message_id, :chunk_id, :relevance_score)"),
-                {"message_id": bot_message_id, "chunk_id": chunk["chunk_id"], "relevance_score": relevance},
-            )
-            sources.append(ChatSource(chunk_id=str(chunk["chunk_id"]), relevance_score=relevance))
+        source_rows = [
+            {
+                "message_id": bot_message_id,
+                "chunk_id": chunk["chunk_id"],
+                "relevance_score": 1 - chunk["distance"],
+            }
+            for chunk in retrieved_chunks
+        ]
+        await db.execute(
+            text("""
+                INSERT INTO message_sources (message_id, chunk_id, relevance_score)
+                VALUES (:message_id, :chunk_id, :relevance_score)
+            """),
+            source_rows,
+        )
+        sources = [
+            ChatSource(chunk_id=str(r["chunk_id"]), relevance_score=r["relevance_score"])
+            for r in source_rows
+        ]
 
     await db.commit()
 
-    return ChatResponse(
-        session_id=str(session_id),
-        answer=answer,
-        sources=sources,
-    )
+    return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str
@@ -536,7 +522,7 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
         text("""
             SELECT session_id 
             FROM chat_sessions 
-            WHERE session_id = :sid AS uuid AND tenant_id = :tid AS uuid
+            WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)
         """),
         {"sid": payload.session_id, "tid": payload.tenant_id},
     )
@@ -550,7 +536,7 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
             SET status = 'completed',
                 customer_satisfaction = COALESCE(:csat, customer_satisfaction),
                 end_datetime = NOW()
-            WHERE session_id = :sid AS uuid AND tenant_id = :tid AS uuid
+            WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)
         """),
         {
             "sid": payload.session_id,
@@ -744,7 +730,6 @@ async def list_sessions(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Dynamic SQL query construction
     query_str = """
         SELECT
             cs.session_id,
@@ -778,25 +763,6 @@ async def list_sessions(
     result = await db.execute(text(query_str), params)
     rows = result.fetchall()
     return [dict(row._mapping) for row in rows]
-
-    # 2. Compute aggregated metrics for dashboard metric cards
-    csat_result = await db.execute(
-        text("""
-            SELECT 
-                ROUND(AVG(customer_satisfaction)::numeric, 1) AS avg_csat,
-                COUNT(customer_satisfaction) AS total_feedback,
-                COUNT(*) AS total_sessions
-            FROM chat_sessions
-            WHERE tenant_id = CAST(:tenant_id AS uuid)
-        """),
-        {"tenant_id": current_user["tenant_id"]},
-    )
-    stats = dict(csat_result.fetchone()._mapping)
-
-    return {
-        "stats": stats,
-        "sessions": sessions,
-    }
 
 
 @app.get("/sessions/{session_id}/messages")

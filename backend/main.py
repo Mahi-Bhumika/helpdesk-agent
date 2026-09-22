@@ -370,24 +370,23 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     if not origin or extract_origin(tenant.website_domain) != origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
     
-    # Step 1: Create session if missing
-# Step 1: Ensure session exists or create a new one
+    # Step 1: Ensure session exists or create a new one
     session_id = query.session_id
 
     if session_id:
         # Check if session exists in DB
         existing_session = await db.execute(
-            text("SELECT session_id FROM chat_sessions WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid"),
+            text("SELECT session_id FROM chat_sessions WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)"),
             {"sid": session_id, "tid": query.tenant_id}
         )
         if not existing_session.fetchone():
-            session_id = None  # Force creation of a valid session if not found
+            session_id = None  # Reset to create a new session if not found
 
     if not session_id:
         session_result = await db.execute(
             text("""
                 INSERT INTO chat_sessions (tenant_id)
-                VALUES (:tenant_id::uuid)
+                VALUES (CAST(:tenant_id AS uuid))
                 RETURNING session_id
             """),
             {"tenant_id": query.tenant_id},
@@ -506,7 +505,7 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
         text("""
             SELECT session_id 
             FROM chat_sessions 
-            WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid
+            WHERE session_id = :sid AS uuid AND tenant_id = :tid AS uuid
         """),
         {"sid": payload.session_id, "tid": payload.tenant_id},
     )
@@ -520,7 +519,7 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
             SET status = 'completed',
                 customer_satisfaction = COALESCE(:csat, customer_satisfaction),
                 end_datetime = NOW()
-            WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid
+            WHERE session_id = :sid AS uuid AND tenant_id = :tid AS uuid
         """),
         {
             "sid": payload.session_id,

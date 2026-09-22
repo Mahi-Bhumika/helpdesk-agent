@@ -170,12 +170,12 @@ export default function SessionsListPage() {
                                     <td className="py-3 text-text-secondary">{formatDate(s.start_datetime)}</td>
                                     <td className="py-3 text-text-secondary">{s.message_count ?? "—"}</td>
                                     <td className="py-3">
-                                        {s.end_datetime ? (
-                                            <PillBadge status="completed" />
-                                        ) : (
-                                            <PillBadge status="active" label="Ongoing" />
-                                        )}
-                                    </td>
+                                    {s.end_datetime || s.customer_satisfaction != null ? (
+                                        <PillBadge status="completed" label="Completed" />
+                                    ) : (
+                                        <PillBadge status="active" label="Ongoing" />
+                                    )}
+                                    </td>                                    
                                     <td className="py-3 font-medium">
                                         {s.customer_satisfaction != null ? (
                                             <span className="text-amber-400">

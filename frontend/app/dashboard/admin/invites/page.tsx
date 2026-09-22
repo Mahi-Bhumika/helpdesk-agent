@@ -183,7 +183,7 @@ export default function InvitesAdminPage() {
                         size="sm"
                         disabled={actioningId === u.user_id}
                         onClick={() => handleDecision(u.user_id, "decline")}
-                        className="bg-black hover:bg-neutral-950 text-red-500 border border-red-500/80 hover:border-red-500 rounded-lg transition-all duration-200 [text-shadow:0_0_8px_rgba(239,68,68,0.8)] hover:[text-shadow:0_0_12px_rgba(239,68,68,1)] shadow-[0_0_10px_rgba(239,68,68,0.15)] hover:shadow-[0_0_15px_rgba(239,68,68,0.35)]"
+                        className="bg-[#2A1D1F] hover:bg-[#382427] text-[#F87171] border border-[#5C2B2E] rounded-xl transition-colors"
                     >
                         Decline
                     </Button>

@@ -359,9 +359,9 @@ class ChatResponse(BaseModel):
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
 
-    # Fetch tenant config: needed for the Origin check and the fallback message
+    # Fetch tenant config with required fields
     tenant_row = await db.execute(
-        text("SELECT website_domain, fallback_message FROM tenants WHERE tenant_id = :tid"),
+        text("SELECT website_domain, fallback_message, bot_name, greeting_message FROM tenants WHERE tenant_id = :tid"),
         {"tid": query.tenant_id},
     )
     tenant = tenant_row.fetchone()
@@ -370,7 +370,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     if not origin or extract_origin(tenant.website_domain) != origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
     
-# Step 1: Create session if missing
+    # Step 1: Create session if missing
     session_id = query.session_id
     if session_id is None:
         session_result = await db.execute(
@@ -383,14 +383,14 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Query vector store FIRST
+    # Step 2: Query vector store using Cosine Distance operator (<=>)
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
-        SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <-> :query_embedding AS distance
+        SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
         FROM document_chunks
         WHERE tenant_id = :tenant_id
-        ORDER BY embedding <-> :query_embedding
+        ORDER BY embedding <=> :query_embedding
         LIMIT :top_k
     """)
     result = await db.execute(search_query, {
@@ -401,61 +401,47 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     rows = result.fetchall()
 
     # Step 3: Filter chunks using Similarity (1.0 = exact match)
-    # Lowering to 0.40–0.45 ensures short valid questions pass through safely
     SIMILARITY_THRESHOLD = 0.40
 
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
-        if getattr(row, "relevance_score", 1 - row.distance) >= SIMILARITY_THRESHOLD
+        if (1 - row.distance) >= SIMILARITY_THRESHOLD
     ]
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
-    # Step 4: Prompt and LLM completion
 
+    # Step 4: Greeting Interceptor
     GREETINGS = {
-    # Basic & Casual
-    "hi", "hii", "hiii", "hiiii", "hello", "helloo", "hey", "heyy", "heyyy",
-    "heyya", "yo", "yoo", "sup", "whats up", "what's up", "wbu", "wyd",
-    
-    # Formal & Time-based
-    "good morning", "good afternoon", "good evening", "good day", "greetings",
-    
-    # Conversational Openers
-    "howdy", "hiya", "hola", "bonjour", "namaste", "salutations",
-    "are you there", "anyone there", "anyone here", "is anyone there",
-    
-    # Common Questions / Check-ins
-    "how are you", "how are you doing", "hows it going", "how's it going",
-    "how are things", "what can you do", "who are you", "what is your name",
-    "help", "can you help me", "i need help", "start", "menu"
-}
+        "hi", "hii", "hiii", "hiiii", "hello", "helloo", "hey", "heyy", "heyyy",
+        "heyya", "yo", "yoo", "sup", "whats up", "what's up", "wbu", "wyd",
+        "good morning", "good afternoon", "good evening", "good day", "greetings",
+        "howdy", "hiya", "hola", "bonjour", "namaste", "salutations",
+        "are you there", "anyone there", "anyone here", "is anyone there",
+        "how are you", "how are you doing", "hows it going", "how's it going",
+        "how are things", "what can you do", "who are you", "what is your name",
+        "help", "can you help me", "i need help", "start", "menu"
+    }
     user_message = query.question.strip().lower()
 
-    # Check for simple greetings
     if user_message in GREETINGS:
-        bot_name = tenant.bot_name or "Assistant"
-        greeting_msg = tenant.greeting_message or f"Hello! How can I help you today?"
-        return {"response": greeting_msg, "sources": []}
+        bot_name = getattr(tenant, "bot_name", None) or "Assistant"
+        greeting_msg = getattr(tenant, "greeting_message", None) or "Hello! How can I help you today?"
+        return ChatResponse(
+            session_id=str(session_id),
+            answer=greeting_msg,
+            sources=[]
+        )
     
     system_prompt = (
-    f"You are {tenant.bot_name or 'a helpful AI assistant'}. "
-    "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
-    
-    "RULES:\n"
-    "1. SMALL TALK / GREETINGS: If the user message is a simple greeting, greeting response, or polite small talk "
-    "(e.g., 'hi', 'hello', 'how are you', 'thank you'), reply naturally, politely, and welcome them without using the context. "
-    "Do NOT trigger the fallback message for greetings.\n\n"
-    
-    "2. FACTUAL / PRODUCT QUESTIONS: For actual questions, base your response ONLY on the provided context below.\n"
-    "   - Exception: If the question asks for a process or steps (e.g. 'how do I reset my password'), "
-    "you may use a short numbered list — keeping each step to one short line.\n"
-    f'   - If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond strictly and exactly with: "{fallback_text}"\n\n'
-    
-    "3. FOLLOW-UPS: After answering, if there's likely more relevant detail in the context "
-    "(pricing, specs, related items), briefly invite the user to ask — e.g., 'Want to know about pricing or colors?' "
-    "Skip this if the answer is already complete or if responding to a greeting."
-)
+        f"You are {getattr(tenant, 'bot_name', None) or 'a helpful AI assistant'}. "
+        "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
+        "RULES:\n"
+        "1. SMALL TALK / GREETINGS: If the user message is a simple greeting, greeting response, or polite small talk, reply naturally and politely without using the context.\n\n"
+        "2. FACTUAL / PRODUCT QUESTIONS: For actual questions, base your response ONLY on the provided context below.\n"
+        f'   - If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond strictly and exactly with: "{fallback_text}"\n\n'
+        "3. FOLLOW-UPS: Briefly invite the user to ask follow-up questions if appropriate."
+    )
     user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
 
     completion = groq_client.chat.completions.create(
@@ -467,45 +453,28 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     answer = completion.choices[0].message.content
 
-    # Step 5: Save user message
+    # Step 5 & 6: Save messages
     await db.execute(
-        text("""
-            INSERT INTO messages (session_id, tenant_id, sender, content)
-            VALUES (:session_id, :tenant_id, 'user', :content)
-        """),
+        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (:session_id, :tenant_id, 'user', :content)"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
     )
 
-    # Step 6: Save bot message
     bot_message_result = await db.execute(
-        text("""
-            INSERT INTO messages (session_id, tenant_id, sender, content)
-            VALUES (:session_id, :tenant_id, 'bot', :content)
-            RETURNING message_id
-        """),
+        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (:session_id, :tenant_id, 'bot', :content) RETURNING message_id"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # Step 7: Save sources using individual execution calls
+    # Step 7: Save sources
     sources = []
     if retrieved_chunks:
         for chunk in retrieved_chunks:
-            relevance = 1 / (1 + chunk["distance"])
+            relevance = 1 - chunk["distance"]
             await db.execute(
-                text("""
-                    INSERT INTO message_sources (message_id, chunk_id, relevance_score)
-                    VALUES (:message_id, :chunk_id, :relevance_score)
-                """),
-                {
-                    "message_id": bot_message_id,
-                    "chunk_id": chunk["chunk_id"],
-                    "relevance_score": relevance,
-                },
+                text("INSERT INTO message_sources (message_id, chunk_id, relevance_score) VALUES (:message_id, :chunk_id, :relevance_score)"),
+                {"message_id": bot_message_id, "chunk_id": chunk["chunk_id"], "relevance_score": relevance},
             )
-            sources.append(
-                ChatSource(chunk_id=str(chunk["chunk_id"]), relevance_score=relevance)
-            )
+            sources.append(ChatSource(chunk_id=str(chunk["chunk_id"]), relevance_score=relevance))
 
     await db.commit()
 
@@ -514,8 +483,6 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         answer=answer,
         sources=sources,
     )
-
-
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str

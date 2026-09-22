@@ -169,6 +169,7 @@ async def get_widget_config(tenant_id: str, db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(f"widget-config:{tenant_id}", max_requests=60, window_seconds=60.0)
 
     # UPDATE THIS QUERY:
+
     result = await db.execute(
         text("""
             SELECT bot_name, greeting_message, theme_color, fallback_message
@@ -358,6 +359,17 @@ class ChatResponse(BaseModel):
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
 
+    # Fetch tenant config: needed for the Origin check and the fallback message
+    tenant_row = await db.execute(
+        text("SELECT website_domain, fallback_message FROM tenants WHERE tenant_id = :tid"),
+        {"tid": query.tenant_id},
+    )
+    tenant = tenant_row.fetchone()
+    if not tenant or not tenant.website_domain:
+        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
+    if not origin or extract_origin(tenant.website_domain) != origin:
+        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
+    
 # Step 1: Create session if missing
     session_id = query.session_id
     if session_id is None:

@@ -2,40 +2,33 @@
   "use strict";
 
   function fetchLiveSettingsOnce(config, timeoutMs) {
-    var controller = new AbortController();
-    var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
 
-    return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
-      method: "GET",
-      mode: "cors",
-      signal: controller.signal,
+  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
+    method: "GET",
+    mode: "cors",
+    signal: controller.signal,
+  })
+    .then(function (res) {
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
     })
-      .then(function (res) {
-        clearTimeout(timeoutId);
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
-      })
-      .finally(function () {
-        clearTimeout(timeoutId);
-      });
-  }
-
-  function fetchLiveSettings(config, attempt) {
-    attempt = attempt || 1;
-    var MAX_ATTEMPTS = 4;
-
-    return fetchLiveSettingsOnce(config, 8000).catch(function (err) {
-      if (attempt >= MAX_ATTEMPTS) {
-        console.warn(
-          "[HIKA Widget] widget-config failed after " + MAX_ATTEMPTS + " attempts, using embed snippet defaults.",
-          err
-        );
-        throw err;
-      }
-      console.warn("[HIKA Widget] widget-config attempt " + attempt + " failed, retrying.", err);
-      return fetchLiveSettings(config, attempt + 1);
+    .finally(function () {
+      clearTimeout(timeoutId);
     });
-  }
+}
+
+function fetchLiveSettings(config) {
+  return fetchLiveSettingsOnce(config, 8000).catch(function (err) {
+    console.warn(
+      "[HIKA Widget] widget-config failed, using embed snippet defaults.",
+      err
+    );
+    throw err;
+  });
+}
 
   function mountWidget(config) {
     var host = document.createElement("div");
@@ -331,14 +324,14 @@
     }
 
     fetchLiveSettings(config)
-      .then(function (remoteSettings) {
-        if (remoteSettings) {
-          config.botName = remoteSettings.bot_name || config.botName;
-          config.color = remoteSettings.color || config.color;
-          config.position = remoteSettings.position || config.position;
-          config.greeting = remoteSettings.greeting || config.greeting;
-        }
-      })
+  .then(function (remoteSettings) {
+    if (remoteSettings) {
+      config.botName = remoteSettings.bot_name || config.botName;
+      config.color = remoteSettings.theme_color || config.color;
+      config.greeting = remoteSettings.greeting_message || config.greeting;
+      config.fallbackMessage = remoteSettings.fallback_message || null;
+    }
+  })
       .catch(function () {
         // Fallback already logged in fetchLiveSettings; continue mounting with local script config
       })

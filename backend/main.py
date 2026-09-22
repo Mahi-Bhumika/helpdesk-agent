@@ -400,30 +400,62 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     })
     rows = result.fetchall()
 
-    # Step 3: Filter chunks AFTER rows is populated
-    SIMILARITY_THRESHOLD = 0.35
+    # Step 3: Filter chunks using Similarity (1.0 = exact match)
+    # Lowering to 0.40–0.45 ensures short valid questions pass through safely
+    SIMILARITY_THRESHOLD = 0.40
+
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
-        if row.distance <= SIMILARITY_THRESHOLD
+        if getattr(row, "relevance_score", 1 - row.distance) >= SIMILARITY_THRESHOLD
     ]
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
-
     # Step 4: Prompt and LLM completion
+
+    GREETINGS = {
+    # Basic & Casual
+    "hi", "hii", "hiii", "hiiii", "hello", "helloo", "hey", "heyy", "heyyy",
+    "heyya", "yo", "yoo", "sup", "whats up", "what's up", "wbu", "wyd",
+    
+    # Formal & Time-based
+    "good morning", "good afternoon", "good evening", "good day", "greetings",
+    
+    # Conversational Openers
+    "howdy", "hiya", "hola", "bonjour", "namaste", "salutations",
+    "are you there", "anyone there", "anyone here", "is anyone there",
+    
+    # Common Questions / Check-ins
+    "how are you", "how are you doing", "hows it going", "how's it going",
+    "how are things", "what can you do", "who are you", "what is your name",
+    "help", "can you help me", "i need help", "start", "menu"
+}
+    user_message = payload.question.strip().lower()
+
+    # Check for simple greetings
+    if user_message in GREETINGS:
+        bot_name = tenant.bot_name or "Assistant"
+        greeting_msg = tenant.greeting_message or f"Hello! How can I help you today?"
+        return {"response": greeting_msg, "sources": []}
+    
     system_prompt = (
-        "You are a helpful, friendly support assistant answering questions based only on the "
-        "provided context. Default to 2-4 short sentences, plain conversational language, no "
-        "headers or bullet lists.\n\n"
-        "Exception: if the question genuinely asks for a process, steps, or how to do something "
-        "(e.g. 'how do I reset my password'), you may use a short numbered list instead — but "
-        "keep each step to one short line, and skip the numbered list entirely if the answer is "
-        "naturally just one or two sentences.\n\n"
-        f'If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond with strictly and exactly this message and nothing else: "{fallback_text}"\n\n'
-        "After answering, if there's likely more relevant detail in the context "
-        "(pricing, specs, related items), briefly invite the user to ask — e.g. "
-        "'Want to know about pricing or colors?' Skip this if the answer is already complete."
-    )
+    f"You are {tenant.bot_name or 'a helpful AI assistant'}. "
+    "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
+    
+    "RULES:\n"
+    "1. SMALL TALK / GREETINGS: If the user message is a simple greeting, greeting response, or polite small talk "
+    "(e.g., 'hi', 'hello', 'how are you', 'thank you'), reply naturally, politely, and welcome them without using the context. "
+    "Do NOT trigger the fallback message for greetings.\n\n"
+    
+    "2. FACTUAL / PRODUCT QUESTIONS: For actual questions, base your response ONLY on the provided context below.\n"
+    "   - Exception: If the question asks for a process or steps (e.g. 'how do I reset my password'), "
+    "you may use a short numbered list — keeping each step to one short line.\n"
+    f'   - If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond strictly and exactly with: "{fallback_text}"\n\n'
+    
+    "3. FOLLOW-UPS: After answering, if there's likely more relevant detail in the context "
+    "(pricing, specs, related items), briefly invite the user to ask — e.g., 'Want to know about pricing or colors?' "
+    "Skip this if the answer is already complete or if responding to a greeting."
+)
     user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
 
     completion = groq_client.chat.completions.create(

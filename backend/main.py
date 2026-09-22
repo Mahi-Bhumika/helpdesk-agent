@@ -531,6 +531,30 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
 
     return {"status": "success", "message": "Chat session ended"}
 
+from pydantic import BaseModel
+
+class FeedbackPayload(BaseModel):
+    session_id: str
+    rating: int  # 1 to 5
+
+@app.post("/chat/feedback")
+async def record_feedback(
+    payload: FeedbackPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(
+        text("""
+            UPDATE chat_sessions
+            SET 
+                customer_satisfaction = :rating,
+                end_datetime = NOW()
+            WHERE session_id = CAST(:session_id AS uuid)
+        """),
+        {"session_id": payload.session_id, "rating": payload.rating},
+    )
+    await db.commit()
+    return {"status": "success"}
+
 class WebsiteDomainUpdate(BaseModel):
     website_domain: str
 
@@ -683,29 +707,66 @@ async def decline_user(
 
 @app.get("/sessions")
 async def list_sessions(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    min_csat: Optional[int] = Query(None),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
+    # Dynamic SQL query construction
+    query_str = """
+        SELECT
+            cs.session_id,
+            cs.start_datetime,
+            cs.end_datetime,
+            cs.customer_satisfaction,
+            COUNT(m.message_id) AS message_count,
+            MAX(m.created_at) AS last_message_at
+        FROM chat_sessions cs
+        LEFT JOIN messages m ON m.session_id = cs.session_id
+        WHERE cs.tenant_id = CAST(:tenant_id AS uuid)
+    """
+    params = {"tenant_id": current_user["tenant_id"]}
+
+    if start_date:
+        query_str += " AND cs.start_datetime >= :start_date::timestamp"
+        params["start_date"] = start_date
+    if end_date:
+        query_str += " AND cs.start_datetime <= :end_date::timestamp"
+        params["end_date"] = end_date
+    if min_csat:
+        query_str += " AND cs.customer_satisfaction >= :min_csat"
+        params["min_csat"] = min_csat
+
+    query_str += """
+        GROUP BY cs.session_id
+        ORDER BY cs.start_datetime DESC
+        LIMIT 100
+    """
+
+    result = await db.execute(text(query_str), params)
+    rows = result.fetchall()
+    return [dict(row._mapping) for row in rows]
+
+    # 2. Compute aggregated metrics for dashboard metric cards
+    csat_result = await db.execute(
         text("""
-            SELECT
-                cs.session_id,
-                cs.start_datetime,
-                cs.end_datetime,
-                cs.customer_satisfaction,
-                COUNT(m.message_id) AS message_count,
-                MAX(m.created_at) AS last_message_at
-            FROM chat_sessions cs
-            LEFT JOIN messages m ON m.session_id = cs.session_id
-            WHERE cs.tenant_id = :tenant_id
-            GROUP BY cs.session_id
-            ORDER BY cs.start_datetime DESC
-            LIMIT 100
+            SELECT 
+                ROUND(AVG(customer_satisfaction)::numeric, 1) AS avg_csat,
+                COUNT(customer_satisfaction) AS total_feedback,
+                COUNT(*) AS total_sessions
+            FROM chat_sessions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
         """),
         {"tenant_id": current_user["tenant_id"]},
     )
-    rows = result.fetchall()
-    return [dict(row._mapping) for row in rows]
+    stats = dict(csat_result.fetchone()._mapping)
+
+    return {
+        "stats": stats,
+        "sessions": sessions,
+    }
+
 
 @app.get("/sessions/{session_id}/messages")
 async def get_session_messages(
@@ -713,9 +774,9 @@ async def get_session_messages(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Verify the session belongs to this tenant before returning anything
+    # Verify session ownership using CAST for UUID safety
     session_check = await db.execute(
-        text("SELECT tenant_id FROM chat_sessions WHERE session_id = :session_id"),
+        text("SELECT tenant_id FROM chat_sessions WHERE session_id = CAST(:session_id AS uuid)"),
         {"session_id": session_id},
     )
     session_row = session_check.fetchone()
@@ -728,12 +789,17 @@ async def get_session_messages(
         text("""
             SELECT message_id, sender, content, sentiment, response_latency_ms, created_at
             FROM messages
-            WHERE session_id = :session_id
+            WHERE session_id = CAST(:session_id AS uuid)
             ORDER BY created_at ASC
         """),
         {"session_id": session_id},
     )
     messages = [dict(row._mapping) for row in messages_result.fetchall()]
+
+    if not messages:
+        return []
+
+    message_ids = [m["message_id"] for m in messages]
 
     sources_result = await db.execute(
         text("""
@@ -743,7 +809,7 @@ async def get_session_messages(
             WHERE ms.message_id = ANY(:message_ids)
             ORDER BY ms.relevance_score DESC
         """),
-        {"message_ids": [m["message_id"] for m in messages]},
+        {"message_ids": message_ids},
     )
     sources_by_message: dict = {}
     for row in sources_result.fetchall():

@@ -171,22 +171,23 @@ export default function InvitesAdminPage() {
                     {new Date(u.invited_at ?? u.created_at).toLocaleString()}
                   </td>
                   <td className="px-6 py-4 flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      disabled={actioningId === u.user_id}
-                      onClick={() => handleDecision(u.user_id, "approve")}
-                      className="bg-indigo-600 hover:bg-indigo-500 text-white font-medium shadow-sm transition-colors border-none"
+                    <div className="flex items-center gap-2">
+                    {/* Accept Button - Primary Purple/Indigo */}
+                    <button
+                        type="button"
+                        className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors outline-none border-0"
                     >
-                      Accept
-                    </Button>
-                    <Button
-                        size="sm"
-                        disabled={actioningId === u.user_id}
-                        onClick={() => handleDecision(u.user_id, "decline")}
-                        className="bg-[#2A1D1F] hover:bg-[#382427] text-[#F87171] border border-[#5C2B2E] rounded-xl transition-colors"
+                        Accept
+                    </button>
+
+                    {/* Decline Button - Neutral Dark Slate (No Blue/Purple, No Red Border, Same Shape) */}
+                    <button
+                        type="button"
+                        className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-gray-200 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-colors outline-none"
                     >
                         Decline
-                    </Button>
+                    </button>
+                    </div>
                   </td>
                 </tr>
               ))}

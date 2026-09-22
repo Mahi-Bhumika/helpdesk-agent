@@ -190,62 +190,62 @@ export default function SettingsPage() {
                         )}
                     </GlassCard>
 
-                    <GlassCard padding="lg" className="h-fit">
-                        <p className="text-sm text-text-secondary mb-4">Widget preview</p>
-                        <div className="rounded-xl2 border border-white/[0.08] overflow-hidden h-80 flex flex-col">
-                            {/* Header — mirrors the widget's real .HIKA-panel-header */}
-                            <div
-                                className="flex items-center justify-between px-4 py-3 flex-shrink-0"
-                                style={{ backgroundColor: isEditing ? draft.theme_color : saved.theme_color }}
-                            >
-                                <span className="text-sm font-semibold text-white">
-                                    {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}
-                                </span>
-                                <div className="flex items-center gap-2">
-                                    <span className="text-[11px] font-medium text-white/90 bg-white/20 rounded-full px-2.5 py-1">
-                                        End Chat
-                                    </span>
-                                    <span className="text-white/85 text-sm leading-none">✕</span>
-                                </div>
-                            </div>
-
-                            {/* Body — stays dark to match the dashboard, unlike the live widget's white body */}
-                            <div className="flex-1 bg-obsidian-surface p-4 flex flex-col gap-3 overflow-y-auto">
-                                <div className="flex flex-col items-start max-w-[85%]">
-                                    <div
-                                        className="rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-white"
-                                        style={{ backgroundColor: isEditing ? draft.theme_color : saved.theme_color }}
-                                    >
-                                        {(isEditing ? draft.greeting_message : saved.greeting_message) || "Hi! How can I help you today?"}
-                                    </div>
-                                    <span className="text-[10.5px] text-text-muted mt-1 px-1">10:05 AM</span>
-                                </div>
-
-                                <div className="flex flex-col items-end self-end max-w-[85%]">
-                                    <div className="rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-white/[0.08] text-text-primary">
-                                        What are your business hours?
-                                    </div>
-                                    <span className="text-[10.5px] text-text-muted mt-1 px-1">10:05 AM</span>
-                                </div>
-                            </div>
-                        </div>
-                        <p className="text-xs text-text-muted mt-3 text-center">
-                            {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}'s greeting, shown as visitors will see it
+                    <GlassCard padding="lg">
+                        <label className="flex flex-col gap-1.5">
+                            <span className="text-sm text-text-secondary">Your website domain</span>
+                            <input
+                                type="text"
+                                value={websiteDomain}
+                                onChange={(e) => setWebsiteDomain(e.target.value)}
+                                placeholder="yourcompany.com"
+                                className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2.5 text-sm text-text-primary"
+                            />
+                        </label>
+                        <p className="text-xs text-text-muted mt-1.5 mb-4">
+                            The domain where your chat widget is embedded. Required for the widget to work.
                         </p>
+                        <Button variant="secondary" onClick={handleSaveWebsiteDomain} disabled={savingDomain}>
+                            {savingDomain ? "Saving..." : "Save"}
+                        </Button>
+                        {domainSaved && <p className="text-sm text-status-active mt-2">Saved ✓</p>}
                     </GlassCard>
                 </div>
 
                 <GlassCard padding="lg" className="h-fit">
                     <p className="text-sm text-text-secondary mb-4">Widget preview</p>
-                    <div className="rounded-xl2 bg-obsidian-surface border border-white/[0.08] p-4 flex flex-col gap-3 h-80">
+                    <div className="rounded-xl2 border border-white/[0.08] overflow-hidden h-80 flex flex-col">
                         <div
-                            className="self-start max-w-[85%] rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-white"
+                            className="flex items-center justify-between px-4 py-3 flex-shrink-0"
                             style={{ backgroundColor: isEditing ? draft.theme_color : saved.theme_color }}
                         >
-                            {(isEditing ? draft.greeting_message : saved.greeting_message) || "Hi! How can I help you today?"}
+                            <span className="text-sm font-semibold text-white">
+                                {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}
+                            </span>
+                            <div className="flex items-center gap-2">
+                                <span className="text-[11px] font-medium text-white/90 bg-white/20 rounded-full px-2.5 py-1">
+                                    End Chat
+                                </span>
+                                <span className="text-white/85 text-sm leading-none">✕</span>
+                            </div>
                         </div>
-                        <div className="self-end max-w-[85%] rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-white/[0.08] text-text-primary">
-                            What are your business hours?
+
+                        <div className="flex-1 bg-obsidian-surface p-4 flex flex-col gap-3 overflow-y-auto">
+                            <div className="flex flex-col items-start max-w-[85%]">
+                                <div
+                                    className="rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm text-white"
+                                    style={{ backgroundColor: isEditing ? draft.theme_color : saved.theme_color }}
+                                >
+                                    {(isEditing ? draft.greeting_message : saved.greeting_message) || "Hi! How can I help you today?"}
+                                </div>
+                                <span className="text-[10.5px] text-text-muted mt-1 px-1">10:05 AM</span>
+                            </div>
+
+                            <div className="flex flex-col items-end self-end max-w-[85%]">
+                                <div className="rounded-2xl rounded-br-sm px-4 py-2.5 text-sm bg-white/[0.08] text-text-primary">
+                                    What are your business hours?
+                                </div>
+                                <span className="text-[10.5px] text-text-muted mt-1 px-1">10:05 AM</span>
+                            </div>
                         </div>
                     </div>
                     <p className="text-xs text-text-muted mt-3 text-center">

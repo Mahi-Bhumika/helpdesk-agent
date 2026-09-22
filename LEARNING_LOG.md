@@ -1071,3 +1071,177 @@ More independent work closing out real gaps identified earlier in the week (the 
 - Retrieval quality bug (cosine distance vs. similarity confusion) found and fixed independently — worth a deliberate retest across a batch of real questions to confirm the new `0.40–0.45` threshold is well-tuned, not just "no longer completely broken"
 - `/kb/upload` had a duplicate-work bug (chunking and embedding each ran twice per upload) found and fixed mid-week — worth confirming this fix is still intact given how much `main.py` has been edited since
 - Next up per the roadmap: Week 7 is containerization (Docker), CI/CD (GitHub Actions), and getting `main` always deployable — the deploy-reliability lessons from this week's debugging chain (checking deploy status before retesting, catching import errors before they ship) are directly relevant heading into that work
+
+# Week 6 — Learning Log (Bhumika)
+
+## TL;DR
+
+Went from raw obsidian/gradient components on Tuesday (Sidebar, PillBadge) to a genuinely working dark-themed dashboard by Sunday — a sessions list built from scratch, a Members page, a real view/edit toggle on Bot Settings, and a fully debugged live widget-config pipeline. The real throughline of this week wasn't building — it was **auditing before building**: more than once, a day I sat down expecting to write real work (transcript drill-in on Thursday, widget polish on Saturday) turned out to already be fully done, and the actual job was confirming that, not redoing it. Also chased a genuinely nasty end-of-week bug where a single stale file paste caused two unrelated regressions at once, which took real untangling to separate.
+
+## What got built this week
+
+- `Sidebar.tsx` + `PillBadge.tsx` + `nav-items.ts`, wired into `dashboard/layout.tsx` with a `footer` slot for logout (Tue)
+- **Sessions list page** (`app/dashboard/sessions/page.tsx`) built from scratch — table, date-range + min-CSAT filters, status pill badges, `message_count` column added later once the need for it surfaced
+- **Members page** (`app/dashboard/member/page.tsx`) — owner-only, built fresh, lists the tenant's team
+- `FAQEntryForm.tsx` — standalone Q&A entry component, posts to a proposed `/kb/faq` endpoint
+- **Bot Settings rebuilt** with a real view/edit toggle — `saved` (last-persisted) vs `draft` (in-progress edits) state split, Edit/Save/Cancel flow, reverts to view mode automatically on save
+- `fallback_message` wired end-to-end: dashboard field (view + edit), Supabase fetch/save, and consumed in `widget.js`'s `/chat` network-error fallback text
+- **Settings page widget preview redesigned** — added a real header bar (bot name, "End Chat" pill, close icon, colored with the live theme color) and per-message timestamps, so it actually resembles the real widget's structure instead of two floating bubbles with nothing around them
+- `widget.js`: live-settings field-name bug fixed, retry logic built out then deliberately simplified back down
+
+## Concepts learned (the real list)
+
+- **Auditing before building is its own skill, not a shortcut.** Checking the actual current code against the written plan — not just trusting the plan — twice this week (Thursday's transcript page, Saturday's widget CSS) saved real time that would've gone into rebuilding something already correct.
+- **A `200` response proves the request succeeded, not that both sides agree on the data's shape.** The widget-config bug looked network-related for a while because the Network tab showed a clean `200` the entire time — the real problem (`color`/`greeting` vs. `theme_color`/`greeting_message`) was only visible in the actual response body, never in the request/response status.
+- **A refactor pass is just as capable of introducing new bugs as a first build.** Simplifying the retry logic wasn't "just deleting code" — a single stale paste dropped an entire function (`fetchLiveSettingsOnce`) *and* silently reverted an already-fixed bug from earlier in the session, at the same time, in the same paste. Two regressions, one cause, neither obviously connected on the surface.
+- **The native `<select>` dark-theme bug is officially a recurring pattern now** (third time this project, different dropdown each time) — OS-rendered option popups don't inherit page CSS the way the closed control does.
+- **Bounded retry beats infinite retry for a public-facing fetch.** A widget that retries forever against a genuinely broken tenant config would hammer the backend on every single visitor's page load, forever, for zero benefit — capping attempts fails safely instead.
+- **`customer_satisfaction` being `NULL` everywhere isn't a bug, it's an unbuilt feature** — nothing in the system, widget or backend, has ever written to that column. No amount of frontend debugging fixes a value nothing ever sets.
+- **RLS "enabled but zero policy" silently returns zero rows to everyone, including the resource's own owner** — directly relevant to why a fresh Members page might only ever show one row (the owner's own) until a real `SECURITY DEFINER` policy exists.
+- **A design decision is allowed to just be cancelled.** The HIKA watermark went from "add it" → visually colliding with the sidebar's existing logo → width-capped fix → fully removed, once it was clear the sidebar already covered that branding need and two competing marks was worse than one.
+
+## Real bugs found and fixed
+
+1. **Overview nav item always active** — `pathname?.startsWith(href + "/")` matched every route since `/dashboard/` is a prefix of literally all of them. Fixed with an exact-match exception for `/dashboard` itself.
+2. **CSAT filter `<select>` white-on-white** — same root cause as Week 5's Documents category dropdown; forced with `[&>option]:bg-white [&>option]:text-gray-900`.
+3. **`nav-items.ts`: Embed Script missing `ownerOnly: true`** — directly contradicted the blueprint's own role table; a regular member would've seen a link to a page they shouldn't access.
+4. **Bot Settings: fallback-message textarea missing from the edit-mode form** — a diff I described got mislabeled mid-conversation, so the textarea was added to the fetch/view side but not actually the editable form; caught when it didn't show up, full corrected file delivered after.
+5. **`widget-config` field-name mismatch** — `widget.js` checked `remoteSettings.color`/`.greeting`, the backend actually returned `theme_color`/`greeting_message`. Only `bot_name` happened to match on both sides, which is exactly why this looked worse than it was at first — the UI silently kept its static defaults with zero error anywhere.
+6. **Stale-paste regression** — simplifying the retry logic back down accidentally pasted a version of `widget.js` missing `fetchLiveSettingsOnce` entirely, causing a `ReferenceError` on every page load (meaning `widget-config` likely wasn't being called at all anymore) — and the same paste silently reverted the field-name fix from bug #5. Both restored.
+7. **Duplicate widget-preview card on Settings** — a fix meant to *replace* the old flat two-bubble preview got pasted *alongside* it instead, leaving three cards where there should've been two and breaking the intended layout. The website-domain card also got accidentally deleted mid-cleanup, then restored to its original spot.
+8. **HIKA watermark colliding with the Sidebar's own logo** — `Sidebar.tsx` already renders "HIKA" in its own header block; a second global watermark in the root layout caused visual overlap, and its unconstrained width let a subtitle run straight through the sidebar's border into the main content. Fixed with width-capping, then made moot entirely once the watermark was cancelled (see Decisions).
+
+## Bugs found, flagged, not fixed yet
+
+- **`get_widget_config` backend has no null check** — calls `tenant.bot_name` straight after `fetchone()`; a bad or deleted `tenant_id` would `500` instead of returning a clean `404`. Mahi's file to fix.
+- **`fallback_message` isn't wired into an actual "bot found no good answer" case yet** — only into the network-error catch block so far. Blocked on knowing `/chat`'s real response shape for a genuine no-match scenario.
+- **Sidebar was agreed to become fixed/sticky** (stop scrolling with the page) — but no actual `position: fixed` + layout-offset code got written this session. Still outstanding, needs a real check on whether it landed.
+
+## The debugging saga worth remembering
+
+The widget-config bug looked, at first glance, exactly like the kind of network problem I'd chased all project — something worth re-checking the fetch/retry logic over. The Network tab said `200` the whole time, which is normally the "this part's fine" signal. It wasn't. A clean `200` only confirms the request succeeded; it says nothing about whether both sides of the contract agree on field names. The real bug (`color`/`greeting` vs. `theme_color`/`greeting_message`) was invisible anywhere in the network layer — only the actual JSON body gave it away.
+
+Then, mid-fix, simplifying the retry logic introduced a *second*, completely unrelated regression from one bad paste — a missing function caused a page-load-time `ReferenceError`, which likely meant the settings fetch wasn't even running anymore, while the exact same paste silently un-fixed the field-name bug that had just been resolved. Two bugs, one paste, neither one obviously pointing at the other. Worth keeping: "I fixed it and confirmed with a `200`" is not the same claim as "I confirmed the actual data landed correctly" — and a refactor pass deserves the same scrutiny as a first build, not less, because it's just as able to quietly delete something that already worked.
+
+## What confused me (the honest section)
+
+- Assumed a `200` in the Network tab meant the fetch layer was cleared and the bug had to be somewhere else — cost real time before actually reading the response body confirmed it was a shape mismatch the whole time.
+- Didn't expect a "simplify this back down" request to be risky — treated it as strictly removing complexity, not something that could regress an already-fixed bug. It did.
+- Briefly tried to make the watermark and the sidebar's existing logo coexist (width-capping, positioning) before stepping back and asking whether two brand marks on the same screen made sense at all — the simpler fix was removing the newer one, not reconciling both.
+
+## Where things stand heading into Week 7
+
+Sidebar, PillBadge, Sessions list, Members page, and Bot Settings' view/edit toggle are all built and functioning against real (if partially unconfirmed) contracts. Widget-config is now genuinely fixed end-to-end — field names match, retry logic is back to a simple single-attempt-with-timeout, and the regression from the stale paste is resolved. Widget itself was approved as final in its current state. Watermark question is closed (not being added). Carried forward, not done: the backend null-check on `get_widget_config`, wiring `fallback_message` into a real no-match `/chat` case, confirming the sidebar's fixed/sticky positioning actually landed in code, and the still-open Wednesday Analytics work (MetricCard restyle, low-relevance-answer list, document coverage gaps) which never got its real reference files this week. Also still open from earlier: the Sessions/Analytics merge idea, and Login/Signup/Pending/Declined pages being outside Week 6's scope entirely — both need an explicit decision with Mahi before Week 7 starts.
+-e 
+
+---
+
+# Appendix — Day-by-Day Reference Log
+
+*The section below is a quicker, day-by-day reference version of the same week — useful for looking up a specific day fast, while the Learning Log above is the reflective/narrative version.*
+
+
+Covers Tuesday's Sidebar/PillBadge build through the ongoing widget-config debugging session. Grouped by day/topic, not strictly chronological.
+
+---
+
+## Tuesday — Design system foundation
+
+**Built:**
+- `components/nav-items.ts` — icon-mapped nav array, `ownerOnly` flag per item
+- `components/Sidebar.tsx` — obsidian bg, gradient active-state indicator, `footer` prop added later for the logout button
+- `components/PillBadge.tsx` — 6 states: active / completed / pending / processing / declined / failed
+- Wired `Sidebar` into `app/dashboard/layout.tsx`, moved logout into its footer slot
+
+**Bugs found & fixed:**
+- **Overview nav item always active** — `pathname?.startsWith(href + "/")` matched every route since `/dashboard/` is a prefix of all of them. Fixed with an exact-match exception for `href === "/dashboard"`.
+
+**Process notes:**
+- Confirmed team pushes straight to `main` (no PRs) — flagged as a real deviation from the plan's stated git rules, low-risk for isolated component work, riskier once Week 7's CI/CD auto-deploys on every push
+- Hit Vercel's free-tier 100-deployments/24hr cap from rapid pushes — no cost, no penalty, resets on its own; only a real risk if it becomes a recurring pattern
+
+**Unrelated fix, same day:** `npm audit` — patched a critical Next.js RCE (CVE-2026-75604, fixed in 16.3.3+) via `npm audit fix --force`, plus `js-yaml`/`sharp` via plain `npm audit fix`. Build confirmed clean afterward.
+
+---
+
+## Wednesday — Analytics (in progress, not yet built)
+
+**Plan:** MetricCard restyle, low-relevance-answer flag list, document coverage gaps list, confirm CSAT/feedback wiring.
+
+**Status:** Placeholder `MetricCard.tsx` + integration snippet provided, but **not yet merged with Mahi's real Tuesday component** — real Analytics page file was requested but not yet shared, so the list/coverage-gap queries haven't been written against real code.
+
+**Needed to actually finish this day:** `app/dashboard/analytics/page.tsx`, `lib/supabase.ts`, and the `/chat` backend handler (to check CSAT wiring) — all still outstanding asks.
+
+---
+
+## Thursday — Transcript drill-in + CSV export
+
+**Status: already done before this session started.** The real `sessions/[sessionId]/page.tsx` already had cited chunks (`message_sources`), CSV export, skeleton loaders, and correct dark-theme tokens (`status-completed`, `accent-violet`, etc.) — no changes needed.
+
+**Note:** an old, unstyled draft of the same file (blue/gray colors, leftover `console.log`) surfaced during file-sharing confusion — confirmed the styled `GlassCard` version is the real, final one.
+
+---
+
+## Friday — Bot Settings + FAQ form
+
+**Built:**
+- `components/FAQEntryForm.tsx` (new, standalone) — Q&A pair form, posts to a proposed `/kb/faq` endpoint
+- Fallback-message field added throughout Settings: type, initial state, fetch `select()`, view mode, edit-mode textarea
+
+**Flagged, not yet real:**
+- `fallback_message` is not a column on `tenants` yet — needs `ALTER TABLE tenants ADD COLUMN fallback_message text;` from Mahi
+- `/kb/faq` endpoint doesn't exist yet — proposed approach: treat a Q&A pair as a one-chunk document (`format: "faq"`) through the existing ingest pipeline
+
+**Already done before this session:** the live widget preview on Settings — no changes needed there.
+
+---
+
+## Saturday — Widget polish
+
+**Status: already fully done.** Went through `widget.js` line by line — Inter font, distinct user/bot bubble styling, rounded corners, gradient/shadow on bot bubbles, typing indicator, timestamps are all already implemented. Nothing to build; only remaining step is an actual live visual check on a real test page.
+
+---
+
+## Sunday — QA + bug bash
+
+No code — shared click-through day with Mahi: every dashboard page (owner + member), responsive/mobile pass, charts against real data, widget on a real external test page, buffer time, write the week's log.
+
+---
+
+## Feature work beyond the original plan
+
+**Sessions list page (`app/dashboard/sessions/page.tsx`)** — didn't exist yet; built from scratch:
+- Table with visitor, started date, message count, status pill (Ongoing/Completed), CSAT
+- Date-range + min-CSAT filters
+- ⚠️ Unconfirmed with Mahi: `GET /sessions` response field names (`end_user_name`/`end_user_email`), query param names (`start_date`/`end_date`/`min_csat`), and `message_count` (needs a `COUNT(*)` grouped by `session_id` added to her endpoint)
+
+**CSAT not showing a value** — diagnosed as a real data gap, not a bug: nothing in the system (widget or backend) ever writes to `customer_satisfaction`. Needs: a feedback prompt in the widget UI, a new endpoint (e.g. `PATCH /sessions/{id}/feedback`), then the existing display just works. Flagged as new scope for Mahi.
+
+**Members page (`app/dashboard/member/page.tsx`)** — built fresh, owner-only (client-side redirect guard). ⚠️ Needs a real RLS policy from Mahi (`SECURITY DEFINER` helper per the Week 4 plan) — without it, an owner querying `users` will still only see their own row, not the whole team.
+
+**`nav-items.ts` bug fixed:** Embed Script was missing `ownerOnly: true`, contradicting the blueprint's role table. Fixed. Members page needs the same server-side treatment once its real file is confirmed.
+
+**Bot Settings — view/edit toggle (item 8):** rebuilt with `saved` (last-saved state) vs `draft` (in-progress edits) split. View mode shows read-only summary + Edit button; edit mode shows the form + Save/Cancel. Save reverts to view mode automatically. Full merged file delivered after a mid-build miscommunication (fallback textarea was initially missing from the edit form — caught and fixed).
+
+**CSAT dropdown contrast bug** — same white-on-white native `<select>` issue as Week 5's Documents category dropdown. Fixed with `[&>option]:bg-white [&>option]:text-gray-900`.
+
+**Sessions "not loading"** — resolved; turned out to be the user's internet connection, not a code issue.
+
+**Widget-config retry logic (item 11):**
+- Confirmed the 8-second timeout was already correctly implemented
+- V1: single retry added (~16s worst case)
+- V2 (per request): retries until success, capped at 4 attempts (~32s worst case) to avoid infinite retry against a genuinely broken config
+- Open question: whether to shorten the attempt cap/timeout to reduce worst-case wait — not yet decided
+
+---
+
+## Currently unresolved — active debugging
+
+**Widget UI still shows static/default values**, not live settings, despite `widget-config` returning a real `200` (confirmed via Network tab screenshot). Since the fetch itself succeeds, the likely cause is a field-name or response-shape mismatch between the backend's actual JSON and what `widget.js` checks for (`theme_color`, `greeting_message`, `bot_name` at the top level). **Waiting on:** the actual JSON response body from that `widget-config` request to confirm.
+
+---
+
+## Open items waiting on decision
+
+- Sessions + Analytics merge (discussed with a mockup) — parked pending a sync with Mahi, since it changes her Day 2/3 scope too
+

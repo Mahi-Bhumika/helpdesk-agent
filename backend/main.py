@@ -354,14 +354,13 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource]
 
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
 
     # Fetch tenant config with required fields
     tenant_row = await db.execute(
-        text("SELECT website_domain, fallback_message, bot_name, greeting_message FROM tenants WHERE tenant_id = :tid"),
+        text("SELECT website_domain, fallback_message, bot_name, greeting_message FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"),
         {"tid": query.tenant_id},
     )
     tenant = tenant_row.fetchone()
@@ -393,13 +392,27 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Query vector store using Cosine Distance operator (<=>)
+    # Step 2: Fetch last 6 messages from conversation history for memory
+    history_result = await db.execute(
+        text("""
+            SELECT sender, content 
+            FROM messages 
+            WHERE session_id = CAST(:session_id AS uuid) 
+            ORDER BY created_at DESC 
+            LIMIT 6
+        """),
+        {"session_id": session_id}
+    )
+    # Reverse to keep chronological order (oldest to newest)
+    history_rows = list(reversed(history_result.fetchall()))
+
+    # Step 3: Query vector store using Cosine Distance operator (<=>)
     query_embedding = embed_chunks([query.question])[0]
 
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
         FROM document_chunks
-        WHERE tenant_id = :tenant_id
+        WHERE tenant_id = CAST(:tenant_id AS uuid)
         ORDER BY embedding <=> :query_embedding
         LIMIT :top_k
     """)
@@ -410,7 +423,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     })
     rows = result.fetchall()
 
-    # Step 3: Filter chunks using Similarity (1.0 = exact match)
+    # Step 4: Filter chunks using Similarity Threshold
     SIMILARITY_THRESHOLD = 0.40
 
     retrieved_chunks = [
@@ -421,7 +434,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
-    # Step 4: Greeting Interceptor
+    # Step 5: Greeting Interceptor
     GREETINGS = {
         "hi", "hii", "hiii", "hiiii", "hello", "helloo", "hey", "heyy", "heyyy",
         "heyya", "yo", "yoo", "sup", "whats up", "what's up", "wbu", "wyd",
@@ -435,47 +448,65 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     user_message = query.question.strip().lower()
 
     if user_message in GREETINGS:
-        bot_name = getattr(tenant, "bot_name", None) or "Assistant"
         greeting_msg = getattr(tenant, "greeting_message", None) or "Hello! How can I help you today?"
+        
+        # Save greeting messages to DB so history remains intact
+        await db.execute(
+            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+        )
+        await db.execute(
+            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
+        )
+        await db.commit()
+
         return ChatResponse(
             session_id=str(session_id),
             answer=greeting_msg,
             sources=[]
         )
     
+    # Step 6: Construct LLM Messages with Conversation Memory
     system_prompt = (
         f"You are {getattr(tenant, 'bot_name', None) or 'a helpful AI assistant'}. "
         "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
         "RULES:\n"
-        "1. SMALL TALK / GREETINGS: If the user message is a simple greeting, greeting response, or polite small talk, reply naturally and politely without using the context.\n\n"
-        "2. FACTUAL / PRODUCT QUESTIONS: For actual questions, base your response ONLY on the provided context below.\n"
-        f'   - If the context is NO_RELEVANT_CONTEXT_FOUND or the answer isn\'t in the context, respond strictly and exactly with: "{fallback_text}"\n\n'
-        "3. FOLLOW-UPS: Briefly invite the user to ask follow-up questions if appropriate."
+        "1. CONVERSATION CONTEXT: Use previous conversation history to understand follow-up commands or references (e.g., 'gimme list', 'tell me more', 'why').\n"
+        "2. FACTUAL / PRODUCT QUESTIONS: Base your factual answers on the provided context. If the requested information isn't in the provided context or chat history, respond strictly with:\n"
+        f'"{fallback_text}"'
     )
-    user_prompt = f"Context:\n{context}\n\nQuestion: {query.question}"
+
+    llm_messages = [{"role": "system", "content": system_prompt}]
+
+    # Append historic turns into prompt context
+    for h in history_rows:
+        role = "user" if h.sender == "user" else "assistant"
+        llm_messages.append({"role": role, "content": h.content})
+
+    # Append current user query + retrieved context
+    user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
+    llm_messages.append({"role": "user", "content": user_prompt})
 
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=llm_messages,
     )
     answer = completion.choices[0].message.content
 
-    # Step 5 & 6: Save messages
+    # Step 7: Save current turn to DB
     await db.execute(
-        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (:session_id, :tenant_id, 'user', :content)"),
+        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
     )
 
     bot_message_result = await db.execute(
-        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (:session_id, :tenant_id, 'bot', :content) RETURNING message_id"),
+        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content) RETURNING message_id"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # Step 7: Save sources
+    # Step 8: Save source references
     sources = []
     if retrieved_chunks:
         for chunk in retrieved_chunks:

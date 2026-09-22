@@ -1,0 +1,45 @@
+name: Frontend CI
+
+# TRIGGER — run this workflow whenever a PR targets main
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "frontend/**"   # only run if something in frontend/ actually changed
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+
+    # Since your repo is a monorepo (frontend/ + backend/),
+    # every step below needs to run *inside* frontend/
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      # STEP 1 — pull the repo's code onto this runner
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # STEP 2 — install the right Node version
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      # STEP 3 — install dependencies exactly as package-lock.json specifies
+      - name: Install dependencies
+        run: npm ci
+
+      # STEP 4 — lint (catches obvious code issues before merge)
+      - name: Lint
+        run: npm run lint
+
+      # STEP 5 — build (catches anything lint misses — broken imports,
+      # type errors, the supabaseUrl-is-required style build-time crash
+      # you actually hit in Week 3)
+      - name: Build
+        run: npm run build

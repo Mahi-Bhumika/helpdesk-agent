@@ -450,12 +450,18 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # Step 6: Construct LLM messages with conversation memory
     system_prompt = (
-        f"You are {tenant.bot_name or 'a helpful AI assistant'}. "
+        f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business. "
         "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
-        "RULES:\n"
-        "1. CONVERSATION CONTEXT: Use previous conversation history to understand follow-up commands or references (e.g., 'gimme list', 'tell me more', 'why').\n"
-        "2. FACTUAL / PRODUCT QUESTIONS: Base your factual answers on the provided context. If the requested information isn't in the provided context or chat history, respond strictly with:\n"
-        f'"{fallback_text}"'
+        "STRICT RULE — read carefully: You may ONLY answer using information found in the 'Retrieved Context' "
+        "provided below. This applies to every kind of question, with no exceptions — factual questions, casual "
+        "questions, personal questions, opinion questions, anything. You have no knowledge, opinions, preferences, "
+        "or facts of your own outside that context.\n\n"
+        "If the answer is not clearly present in the Retrieved Context, respond with strictly and exactly this "
+        "message and nothing else, regardless of what was asked:\n"
+        f'"{fallback_text}"\n\n'
+        "You may use the conversation history below only to understand what a follow-up question like 'tell me "
+        "more' or 'why' is referring to — never as a source of facts to answer from. If the context doesn't "
+        "contain the answer, history doesn't change that; the fallback still applies."
     )
 
     llm_messages = [{"role": "system", "content": system_prompt}]

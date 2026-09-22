@@ -55,10 +55,24 @@
       '<div class="HIKA-panel" hidden>' +
         '<div class="HIKA-panel-header">' +
           '<span class="HIKA-panel-title">' + config.botName + '</span>' +
-          '<button class="HIKA-close" type="button" aria-label="Close chat">' + closeIcon() + "</button>" +
+          '<div class="HIKA-header-actions">' +
+            '<button class="HIKA-end-btn" type="button" title="End Chat">End Chat</button>' +
+            '<button class="HIKA-close" type="button" aria-label="Close chat">' + closeIcon() + "</button>" +
+          '</div>' +
         "</div>" +
         '<div class="HIKA-panel-body">' +
           '<div class="HIKA-messages" aria-live="polite"></div>' +
+          '<div class="HIKA-csat-view" hidden>' +
+            '<div class="HIKA-csat-title">How was your experience?</div>' +
+            '<div class="HIKA-stars">' +
+              '<button type="button" class="HIKA-star" data-rating="1">★</button>' +
+              '<button type="button" class="HIKA-star" data-rating="2">★</button>' +
+              '<button type="button" class="HIKA-star" data-rating="3">★</button>' +
+              '<button type="button" class="HIKA-star" data-rating="4">★</button>' +
+              '<button type="button" class="HIKA-star" data-rating="5">★</button>' +
+            '</div>' +
+            '<button type="button" class="HIKA-csat-skip">Skip rating</button>' +
+          '</div>' +
         "</div>" +
         '<div class="HIKA-panel-footer">' +
           '<input type="text" class="HIKA-input" placeholder="Type your question…" aria-label="Message" />' +
@@ -70,14 +84,20 @@
     var bubble = root.querySelector(".HIKA-bubble");
     var panel = root.querySelector(".HIKA-panel");
     var closeBtn = root.querySelector(".HIKA-close");
+    var endBtn = root.querySelector(".HIKA-end-btn");
     var messagesEl = root.querySelector(".HIKA-messages");
     var panelBody = root.querySelector(".HIKA-panel-body");
     var inputEl = root.querySelector(".HIKA-input");
     var sendBtn = root.querySelector(".HIKA-send");
+    var footerEl = root.querySelector(".HIKA-panel-footer");
+    var csatView = root.querySelector(".HIKA-csat-view");
+    var skipBtn = root.querySelector(".HIKA-csat-skip");
+    var starBtns = root.querySelectorAll(".HIKA-star");
 
     var hasGreeted = false;
     var sessionId = null;
     var isSending = false;
+    var selectedRating = null;
 
     function formatTime(date) {
       var hours = date.getHours();
@@ -134,12 +154,53 @@
         appendMessage(config.greeting, "bot");
         hasGreeted = true;
       }
-      inputEl.focus();
+      if (csatView.hidden) {
+        inputEl.focus();
+      }
     }
 
     function closePanel() {
       panel.hidden = true;
       bubble.setAttribute("aria-expanded", "false");
+    }
+
+    function showCsatScreen() {
+      messagesEl.hidden = true;
+      footerEl.style.display = "none";
+      endBtn.style.display = "none";
+      csatView.hidden = false;
+    }
+
+    function resetWidgetState() {
+      sessionId = null;
+      hasGreeted = false;
+      messagesEl.innerHTML = "";
+      messagesEl.hidden = false;
+      csatView.hidden = true;
+      footerEl.style.display = "flex";
+      endBtn.style.display = "block";
+      selectedRating = null;
+      starBtns.forEach(function (btn) { btn.classList.remove("selected"); });
+    }
+
+    function submitChatEnd(rating) {
+      if (sessionId) {
+        fetch(config.apiUrl + "/chat/end", {
+          method: "POST",
+          mode: "cors",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sessionId,
+            tenant_id: config.tenantId,
+            csat: rating,
+          }),
+        }).catch(function (err) {
+          console.error("[HIKA Widget] Failed to log chat end:", err);
+        });
+      }
+
+      resetWidgetState();
+      closePanel();
     }
 
     function handleSend() {
@@ -193,7 +254,7 @@
           );
           typingEl.remove();
           appendMessage(
-            config.fallbackMessage || "Sorry, something went wrong reaching the server. Please try again.",
+            "Sorry, something went wrong reaching the server. Please try again.",
             "bot"
           );
         })
@@ -203,10 +264,37 @@
         });
     }
 
+    // Event Listeners
     bubble.addEventListener("click", function () {
       panel.hidden ? openPanel() : closePanel();
     });
     closeBtn.addEventListener("click", closePanel);
+    endBtn.addEventListener("click", showCsatScreen);
+    skipBtn.addEventListener("click", function () { submitChatEnd(null); });
+
+    starBtns.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var rating = parseInt(btn.getAttribute("data-rating"), 10);
+        submitChatEnd(rating);
+      });
+
+      btn.addEventListener("mouseenter", function () {
+        var hoverRating = parseInt(btn.getAttribute("data-rating"), 10);
+        starBtns.forEach(function (s) {
+          var r = parseInt(s.getAttribute("data-rating"), 10);
+          if (r <= hoverRating) {
+            s.classList.add("hover");
+          } else {
+            s.classList.remove("hover");
+          }
+        });
+      });
+
+      btn.addEventListener("mouseleave", function () {
+        starBtns.forEach(function (s) { s.classList.remove("hover"); });
+      });
+    });
+
     sendBtn.addEventListener("click", handleSend);
     inputEl.addEventListener("keydown", function (e) {
       if (e.key === "Enter") handleSend();
@@ -246,9 +334,9 @@
       .then(function (remoteSettings) {
         if (remoteSettings) {
           config.botName = remoteSettings.bot_name || config.botName;
-          config.color = remoteSettings.theme_color || config.color;
-          config.greeting = remoteSettings.greeting_message|| config.greeting;
-          config.fallbackMessage = remoteSettings.fallback_message || null;
+          config.color = remoteSettings.color || config.color;
+          config.position = remoteSettings.position || config.position;
+          config.greeting = remoteSettings.greeting || config.greeting;
         }
       })
       .catch(function () {
@@ -307,10 +395,14 @@
       ".HIKA-panel-header{background:" + config.color + ";color:#fff;padding:14px 16px;" +
       "display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}" +
       ".HIKA-panel-title{font-weight:600;font-size:15px;letter-spacing:-0.01em;}" +
+      ".HIKA-header-actions{display:flex;align-items:center;gap:8px;}" +
+      ".HIKA-end-btn{background:rgba(255,255,255,0.2);border:none;color:#fff;font-size:11.5px;" +
+      "font-weight:500;padding:4px 8px;border-radius:12px;cursor:pointer;transition:background 0.2s;}" +
+      ".HIKA-end-btn:hover{background:rgba(255,255,255,0.35);}" +
       ".HIKA-close{background:none;border:none;color:#fff;cursor:pointer;padding:2px;display:flex;opacity:0.85;}" +
       ".HIKA-close:hover{opacity:1;}" +
-      ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;background:#fafafb;}" +
-      ".HIKA-messages{display:flex;flex-direction:column;gap:12px;}" +
+      ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;background:#fafafb;display:flex;flex-direction:column;}" +
+      ".HIKA-messages{display:flex;flex-direction:column;gap:12px;flex:1;}" +
       ".HIKA-msg-wrap{display:flex;flex-direction:column;max-width:82%;}" +
       ".HIKA-msg-wrap-bot{align-self:flex-start;align-items:flex-start;}" +
       ".HIKA-msg-wrap-user{align-self:flex-end;align-items:flex-end;}" +
@@ -328,6 +420,17 @@
       ".HIKA-typing-dots .HIKA-dot:nth-child(2){animation-delay:0.15s;}" +
       ".HIKA-typing-dots .HIKA-dot:nth-child(3){animation-delay:0.3s;}" +
       "@keyframes HIKA-bounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-4px);opacity:1;}}" +
+      ".HIKA-csat-view{display:flex;flex-direction:column;align-items:center;justify-content:center;" +
+      "height:100%;text-align:center;padding:20px 10px;box-sizing:border-box;margin:auto;}" +
+      ".HIKA-csat-view[hidden]{display:none;}" +
+      ".HIKA-csat-title{font-size:16px;font-weight:600;color:#1e1e24;margin-bottom:18px;}" +
+      ".HIKA-stars{display:flex;gap:8px;margin-bottom:20px;}" +
+      ".HIKA-star{background:none;border:none;font-size:28px;color:#d0d0d8;cursor:pointer;" +
+      "padding:2px;transition:color 0.15s, transform 0.15s;line-height:1;}" +
+      ".HIKA-star:hover,.HIKA-star.hover{color:#ffb400;transform:scale(1.2);}" +
+      ".HIKA-csat-skip{background:none;border:none;color:#71717a;font-size:12.5px;cursor:pointer;" +
+      "text-decoration:underline;padding:4px 8px;}" +
+      ".HIKA-csat-skip:hover{color:#1e1e24;}" +
       ".HIKA-panel-footer{flex-shrink:0;display:flex;align-items:center;gap:8px;" +
       "padding:10px 12px;border-top:1px solid #ececef;background:#fff;}" +
       ".HIKA-input{flex:1;border:1px solid #dcdce2;border-radius:20px;padding:9px 14px;" +

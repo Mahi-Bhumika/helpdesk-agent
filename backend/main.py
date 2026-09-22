@@ -521,25 +521,28 @@ class EndChatRequest(BaseModel):
     tenant_id: str
     csat: Optional[int] = Field(None, ge=1, le=5)
 
-
 @app.post("/chat/end")
 async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
     # Verify session exists
     session_result = await db.execute(
-        text("SELECT session_id FROM chat_sessions WHERE session_id = :sid AND tenant_id = :tid"),
+        text("""
+            SELECT session_id 
+            FROM chat_sessions 
+            WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid
+        """),
         {"sid": payload.session_id, "tid": payload.tenant_id},
     )
     if not session_result.fetchone():
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Update status to 'completed' and map csat to customer_satisfaction
+    # Update status, save csat, and set ending timestamp
     await db.execute(
         text("""
             UPDATE chat_sessions
             SET status = 'completed',
                 customer_satisfaction = COALESCE(:csat, customer_satisfaction),
-                ended_at = NOW()
-            WHERE session_id = :sid AND tenant_id = :tid
+                end_datetime = NOW()
+            WHERE session_id = :sid::uuid AND tenant_id = :tid::uuid
         """),
         {
             "sid": payload.session_id,

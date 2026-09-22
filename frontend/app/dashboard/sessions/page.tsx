@@ -13,7 +13,7 @@ type SessionSummary = {
     start_datetime: string;
     end_datetime: string | null;
     customer_satisfaction: number | null;
-     message_count: number | null;
+    message_count: number | null;
 };
 
 export default function SessionsListPage() {
@@ -58,10 +58,38 @@ export default function SessionsListPage() {
         });
     }
 
+    // Calculate aggregated CSAT statistics
+    const ratedSessions = sessions.filter((s) => s.customer_satisfaction != null);
+    const avgCsat = ratedSessions.length > 0
+        ? (ratedSessions.reduce((acc, s) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length).toFixed(1)
+        : null;
+
     return (
         <div className="p-8">
             <h1 className="text-2xl font-semibold text-text-primary mb-6">Chat Sessions</h1>
 
+            {/* CSAT Metric Overview Banner */}
+            <div className="mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <GlassCard padding="md">
+                    <p className="text-xs text-text-secondary">Average CSAT</p>
+                    <div className="flex items-baseline gap-2 mt-1">
+                        <span className="text-2xl font-bold text-text-primary">
+                            {avgCsat ? `${avgCsat} ★` : "—"}
+                        </span>
+                        <span className="text-xs text-text-muted">/ 5.0</span>
+                    </div>
+                </GlassCard>
+                <GlassCard padding="md">
+                    <p className="text-xs text-text-secondary">Total Feedback Received</p>
+                    <p className="text-2xl font-bold text-text-primary mt-1">{ratedSessions.length}</p>
+                </GlassCard>
+                <GlassCard padding="md">
+                    <p className="text-xs text-text-secondary">Total Sessions</p>
+                    <p className="text-2xl font-bold text-text-primary mt-1">{sessions.length}</p>
+                </GlassCard>
+            </div>
+
+            {/* Filter Bar */}
             <div className="flex flex-wrap items-end gap-4 mb-6">
                 <label className="flex flex-col gap-1.5">
                     <span className="text-xs text-text-secondary">From</span>
@@ -88,16 +116,17 @@ export default function SessionsListPage() {
                         onChange={(e) => setCsatFilter(e.target.value)}
                         className="rounded-lg border border-white/[0.1] bg-white/[0.05] px-3 py-2 text-sm text-text-primary [&>option]:bg-white [&>option]:text-gray-900"
                     >
-                    <option value="">Any</option>
-                    <option value="1">1+</option>
-                    <option value="2">2+</option>
-                    <option value="3">3+</option>
-                    <option value="4">4+</option>
-                    <option value="5">5</option>
-                </select>
+                        <option value="">Any</option>
+                        <option value="1">1+ ★</option>
+                        <option value="2">2+ ★</option>
+                        <option value="3">3+ ★</option>
+                        <option value="4">4+ ★</option>
+                        <option value="5">5 ★</option>
+                    </select>
                 </label>
             </div>
 
+            {/* Sessions Table */}
             <GlassCard padding="lg">
                 {loading && (
                     <div className="space-y-3">
@@ -112,7 +141,7 @@ export default function SessionsListPage() {
                 )}
 
                 {!loading && !error && sessions.length === 0 && (
-                    <p className="text-sm text-text-secondary">No sessions yet.</p>
+                    <p className="text-sm text-text-secondary">No sessions found matching filters.</p>
                 )}
 
                 {!loading && !error && sessions.length > 0 && (
@@ -147,8 +176,17 @@ export default function SessionsListPage() {
                                             <PillBadge status="active" label="Ongoing" />
                                         )}
                                     </td>
-                                    <td className="py-3 text-text-secondary">
-                                        {s.customer_satisfaction != null ? `${s.customer_satisfaction}/5` : "—"}
+                                    <td className="py-3 font-medium">
+                                        {s.customer_satisfaction != null ? (
+                                            <span className="text-amber-400">
+                                                {"★".repeat(s.customer_satisfaction)}
+                                                <span className="text-text-muted text-xs ml-1">
+                                                    ({s.customer_satisfaction}/5)
+                                                </span>
+                                            </span>
+                                        ) : (
+                                            <span className="text-text-muted">—</span>
+                                        )}
                                     </td>
                                 </tr>
                             ))}

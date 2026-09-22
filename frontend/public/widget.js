@@ -1,7 +1,26 @@
 (function () {
   "use strict";
 
-  function fetchLiveSettings(config) {
+  function fetchLiveSettingsOnce(config, timeoutMs) {
+  var controller = new AbortController();
+  var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
+
+  return fetch(config.apiUrl + "/tenants/" + config.tenantId + "/widget-config", {
+    method: "GET",
+    mode: "cors",
+    signal: controller.signal,
+  })
+    .then(function (res) {
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .finally(function () {
+      clearTimeout(timeoutId);
+    });
+}
+
+function fetchLiveSettings(config) {
   return fetchLiveSettingsOnce(config, 8000).catch(function (err) {
     console.warn(
       "[HIKA Widget] widget-config failed, using embed snippet defaults.",
@@ -305,14 +324,14 @@
     }
 
     fetchLiveSettings(config)
-      .then(function (remoteSettings) {
-        if (remoteSettings) {
-          config.botName = remoteSettings.bot_name || config.botName;
-          config.color = remoteSettings.color || config.color;
-          config.position = remoteSettings.position || config.position;
-          config.greeting = remoteSettings.greeting || config.greeting;
-        }
-      })
+  .then(function (remoteSettings) {
+    if (remoteSettings) {
+      config.botName = remoteSettings.bot_name || config.botName;
+      config.color = remoteSettings.theme_color || config.color;
+      config.greeting = remoteSettings.greeting_message || config.greeting;
+      config.fallbackMessage = remoteSettings.fallback_message || null;
+    }
+  })
       .catch(function () {
         // Fallback already logged in fetchLiveSettings; continue mounting with local script config
       })

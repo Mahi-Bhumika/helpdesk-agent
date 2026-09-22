@@ -430,7 +430,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     "how are things", "what can you do", "who are you", "what is your name",
     "help", "can you help me", "i need help", "start", "menu"
 }
-    user_message = payload.question.strip().lower()
+    user_message = query.question.strip().lower()
 
     # Check for simple greetings
     if user_message in GREETINGS:

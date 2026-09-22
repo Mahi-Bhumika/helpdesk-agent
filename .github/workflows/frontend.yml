@@ -11,7 +11,7 @@ jobs:
   lint-and-build:
     runs-on: ubuntu-latest
 
-    # Since your repo is a monorepo (frontend/ + backend/),
+    # Since your repo is a monorepo (frontend/ + backend/)
     # every step below needs to run *inside* frontend/
     defaults:
       run:

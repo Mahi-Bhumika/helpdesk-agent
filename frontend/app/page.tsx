@@ -76,7 +76,7 @@ export default function LandingPage() {
 
           <p className="text-base text-text-secondary max-w-md mb-8 leading-relaxed">
             Upload your documentation, embed one script, and let HIKA answer your
-            customers' questions instantly — grounded entirely in your own content.
+            customers&apos; questions instantly — grounded entirely in your own content.
           </p>
 
           <div className="flex items-center gap-5">

@@ -229,7 +229,7 @@ export default function DashboardOverviewPage() {
 
           {recentSessions && recentSessions.length === 0 && (
             <p className="p-10 text-center text-sm text-text-secondary">
-              No conversations yet — once your widget is live, they'll show up here.
+              No conversations yet — once your widget is live, they&apos;ll show up here.
             </p>
           )}
 

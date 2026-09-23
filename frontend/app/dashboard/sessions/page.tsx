@@ -59,11 +59,13 @@ export default function SessionsListPage() {
     }
 
     // Calculate aggregated CSAT statistics
-    const ratedSessions = sessions.filter((s) => s.customer_satisfaction != null);
-    const avgCsat = ratedSessions.length > 0
-        ? (ratedSessions.reduce((acc, s) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length).toFixed(1)
-        : null;
-
+    // @ts-ignore
+        const sessionList = Array.isArray(sessions) ? sessions : (sessions?.sessions || []);
+        const ratedSessions = sessionList.filter((s: any) => s.customer_satisfaction != null);
+        const avgCsat = ratedSessions.length > 0
+            ? (ratedSessions.reduce((acc: number, s: any) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length)
+            : null;
+            
     return (
         <div className="p-8">
             <h1 className="text-2xl font-semibold text-text-primary mb-6">Chat Sessions</h1>

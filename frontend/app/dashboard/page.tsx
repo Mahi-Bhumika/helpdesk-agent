@@ -70,11 +70,7 @@ export default function DashboardOverviewPage() {
   // directly during render (react-hooks/purity). Tradeoff: "x ago" labels
   // freeze at page-load time instead of ticking forward live — acceptable
   // for a recent-activity list, per Mahi's ok.
-  const [now, setNow] = useState<number | null>(null);
-
-  useEffect(() => {
-    setNow(Date.now());
-  }, []);
+  const [now] = useState<number | null>(() => Date.now());
 
   useEffect(() => {
     if (!tenantId) return;

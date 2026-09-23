@@ -481,6 +481,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     answer = completion.choices[0].message.content
 
+    #comment to check
+
     # Step 7: Save current turn to DB
     await db.execute(
         text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),

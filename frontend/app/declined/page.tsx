@@ -1,9 +1,12 @@
-"use client"
+"use client";
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
+import GlassCard from "@/components/GlassCard";
+import Button from "@/components/Button";
+import { XCircle } from "lucide-react";
 
 export default function DeclinedPage() {
     const { session, status, loading } = useAuth();
@@ -28,19 +31,34 @@ export default function DeclinedPage() {
     };
 
     if (loading) {
-        return <div className="flex min-h-screen items-center justify-center">Loading...</div>;
+        return (
+            <main className="flex min-h-screen items-center justify-center bg-[#0B0B0C]">
+                <p className="text-sm text-text-secondary">Loading...</p>
+            </main>
+        );
     }
 
     return (
-        <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-8 text-center">
-            <h1 className="text-2xl font-bold">Access request declined</h1>
-            <p className="max-w-sm text-sm text-gray-400">
-                The team owner did not approve your access request. If you believe this was a
-                mistake, reach out to them directly.
-            </p>
-            <button onClick={handleLogout} className="text-sm text-gray-500 underline">
-                Log out
-            </button>
+        <main className="flex min-h-screen flex-col items-center justify-center bg-[#0B0B0C] p-6">
+            <GlassCard padding="lg" className="max-w-sm w-full flex flex-col items-center text-center gap-5">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-status-declined/10 ring-1 ring-status-declined/30">
+                    <XCircle className="h-7 w-7 text-status-declined" />
+                </div>
+
+                <div className="space-y-2">
+                    <h1 className="text-xl font-semibold text-text-primary">
+                        Access request declined
+                    </h1>
+                    <p className="text-sm leading-relaxed text-text-secondary">
+                        The team owner did not approve your access request. If you
+                        believe this was a mistake, reach out to them directly.
+                    </p>
+                </div>
+
+                <Button variant="ghost" onClick={handleLogout} className="mt-2">
+                    Log out
+                </Button>
+            </GlassCard>
         </main>
     );
 }

@@ -12,7 +12,7 @@ type Member = {
     name: string | null;
     email: string;
     role: string;
-    status: string;
+    status: "pending" | "active" | "declined";   // was: string
     created_at: string;
 };
 
@@ -83,7 +83,7 @@ export default function MembersPage() {
                                     <td className="py-3 text-text-primary">{m.name || "—"}</td>
                                     <td className="py-3 text-text-secondary">{m.email}</td>
                                     <td className="py-3 text-text-secondary capitalize">{m.role}</td>
-                                    <td className="py-3"><PillBadge status={m.status as any} /></td>
+                                    <td className="py-3"><PillBadge status={m.status} /></td>
                                     <td className="py-3 text-text-secondary">
                                         {new Date(m.created_at).toLocaleDateString()}
                                     </td>

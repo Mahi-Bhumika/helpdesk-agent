@@ -69,6 +69,7 @@ export default function DocumentsPage() {
     }, [tenantId]);
 
     useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
         fetchDocs();
     }, [fetchDocs]);
 

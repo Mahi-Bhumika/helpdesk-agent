@@ -85,8 +85,9 @@ export default function InvitesAdminPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
     fetchPending();
-  }, [fetchPending]);
+}, [fetchPending]);
 
   const handleDecision = async (userId: string, action: "approve" | "decline") => {
     setActioningId(userId);

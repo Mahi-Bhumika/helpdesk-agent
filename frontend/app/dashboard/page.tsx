@@ -66,6 +66,16 @@ export default function DashboardOverviewPage() {
   const [messageCount, setMessageCount] = useState<number | null>(null);
   const [recentSessions, setRecentSessions] = useState<RecentSession[] | null>(null);
 
+  // Captured once on mount so timeAgo() below doesn't call Date.now()
+  // directly during render (react-hooks/purity). Tradeoff: "x ago" labels
+  // freeze at page-load time instead of ticking forward live — acceptable
+  // for a recent-activity list, per Mahi's ok.
+  const [now, setNow] = useState<number | null>(null);
+
+  useEffect(() => {
+    setNow(Date.now());
+  }, []);
+
   useEffect(() => {
     if (!tenantId) return;
 
@@ -125,7 +135,8 @@ export default function DashboardOverviewPage() {
   }, [tenantId]);
 
   function timeAgo(iso: string) {
-    const diffMins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (!now) return "";
+    const diffMins = Math.round((now - new Date(iso).getTime()) / 60000);
     if (diffMins < 1) return "just now";
     if (diffMins < 60) return `${diffMins}m ago`;
     const diffHours = Math.round(diffMins / 60);

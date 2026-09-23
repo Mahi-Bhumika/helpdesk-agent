@@ -65,7 +65,7 @@ export default function SessionsListPage() {
         const avgCsat = ratedSessions.length > 0
             ? (ratedSessions.reduce((acc: number, s: any) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length)
             : null;
-            
+
     return (
         <div className="p-8">
             <h1 className="text-2xl font-semibold text-text-primary mb-6">Chat Sessions</h1>
@@ -76,8 +76,8 @@ export default function SessionsListPage() {
                     <p className="text-xs text-text-secondary">Average CSAT</p>
                     <div className="flex items-baseline gap-2 mt-1">
                         <span className="text-2xl font-bold text-text-primary">
-                            {avgCsat ? `${avgCsat} ★` : "—"}
-                        </span>
+                            {avgCsat ? avgCsat.toFixed(1) : "N/A"}                        
+                              </span>
                         <span className="text-xs text-text-muted">/ 5.0</span>
                     </div>
                 </GlassCard>
@@ -158,7 +158,7 @@ export default function SessionsListPage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {sessions.map((s, i) => (
+                            {sessionList.map((s: any, i: number) => (
                                 <tr
                                     key={s.session_id}
                                     onClick={() => router.push(`/dashboard/sessions/${s.session_id}`)}

@@ -39,7 +39,14 @@ export default function SessionsListPage() {
                 const query = params.toString() ? `?${params.toString()}` : "";
                 const res = await authedFetch(`/sessions${query}`, { method: "GET" });
                 if (!res.ok) throw new Error(`Failed to load sessions (HTTP ${res.status})`);
-                setSessions(await res.json());
+
+                // /sessions has been observed returning either a raw array or
+                // { sessions: [...] } — normalizing here, once, keeps `sessions`
+                // state itself always a clean SessionSummary[] everywhere else
+                // in this file. TODO: confirm with Mahi which shape is the real
+                // contract so this fallback can eventually be removed.
+                const data: SessionSummary[] | { sessions: SessionSummary[] } = await res.json();
+                setSessions(Array.isArray(data) ? data : data.sessions ?? []);
             } catch (err) {
                 setError(err instanceof Error ? err.message : "Something went wrong.");
             } finally {
@@ -58,13 +65,12 @@ export default function SessionsListPage() {
         });
     }
 
-    // Calculate aggregated CSAT statistics
-    // @ts-ignore
-        const sessionList = Array.isArray(sessions) ? sessions : (sessions?.sessions || []);
-        const ratedSessions = sessionList.filter((s: any) => s.customer_satisfaction != null);
-        const avgCsat = ratedSessions.length > 0
-            ? (ratedSessions.reduce((acc: number, s: any) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length)
-            : null;
+    // Calculate aggregated CSAT statistics — `sessions` is always a clean
+    // SessionSummary[] now, so no runtime shape-guard or `any` needed here.
+    const ratedSessions = sessions.filter((s) => s.customer_satisfaction != null);
+    const avgCsat = ratedSessions.length > 0
+        ? ratedSessions.reduce((acc, s) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length
+        : null;
 
     return (
         <div className="p-8">
@@ -76,8 +82,8 @@ export default function SessionsListPage() {
                     <p className="text-xs text-text-secondary">Average CSAT</p>
                     <div className="flex items-baseline gap-2 mt-1">
                         <span className="text-2xl font-bold text-text-primary">
-                            {avgCsat ? avgCsat.toFixed(1) : "N/A"}                        
-                              </span>
+                            {avgCsat ? avgCsat.toFixed(1) : "N/A"}
+                        </span>
                         <span className="text-xs text-text-muted">/ 5.0</span>
                     </div>
                 </GlassCard>
@@ -152,13 +158,13 @@ export default function SessionsListPage() {
                             <tr className="text-left text-text-muted text-xs border-b border-white/[0.08]">
                                 <th className="pb-2 font-medium">Visitor</th>
                                 <th className="pb-2 font-medium">Started</th>
-                                <th className="pb-2 font-medium">Messages</th> 
+                                <th className="pb-2 font-medium">Messages</th>
                                 <th className="pb-2 font-medium">Status</th>
                                 <th className="pb-2 font-medium">CSAT</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {sessionList.map((s: any, i: number) => (
+                            {sessions.map((s, i) => (
                                 <tr
                                     key={s.session_id}
                                     onClick={() => router.push(`/dashboard/sessions/${s.session_id}`)}
@@ -177,7 +183,7 @@ export default function SessionsListPage() {
                                     ) : (
                                         <PillBadge status="active" label="Ongoing" />
                                     )}
-                                    </td>                                    
+                                    </td>
                                     <td className="py-3 font-medium">
                                         {s.customer_satisfaction != null ? (
                                             <span className="text-amber-400">

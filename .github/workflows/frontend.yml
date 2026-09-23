@@ -5,14 +5,14 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "frontend/**"
-      - ".github/workflows/frontend.yml"   # only run if something in frontend/ actually changed
+      - "frontend/**"   # only run if something in frontend/ actually changed
+      - ".github/workflows/frontend.yml"   # also run if this workflow itself changes
 
 jobs:
   lint-and-build:
     runs-on: ubuntu-latest
 
-    # Since your repo is a monorepo (frontend/ + backend/)
+    # Since your repo is a monorepo (frontend/ + backend/),
     # every step below needs to run *inside* frontend/
     defaults:
       run:
@@ -44,3 +44,6 @@ jobs:
       # you actually hit in Week 3)
       - name: Build
         run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}

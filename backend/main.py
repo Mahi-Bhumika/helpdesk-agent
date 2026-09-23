@@ -439,7 +439,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     rows = result.fetchall()
 
     # Step 5: Filter chunks using Similarity Threshold
-    SIMILARITY_THRESHOLD = 0.40
+    SIMILARITY_THRESHOLD = 0.35
     retrieved_chunks = [
         dict(row._mapping) for row in rows 
         if (1 - row.distance) >= SIMILARITY_THRESHOLD
@@ -471,6 +471,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
     llm_messages.append({"role": "user", "content": user_prompt})
+
+    print(f"[DEBUG] Question: {query.question}")
+    print(f"[DEBUG] Context sent to LLM:\n{context}")
 
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",

@@ -175,20 +175,24 @@ export default function InvitesAdminPage() {
                         {/* Accept Button - Primary Purple */}
                         <button
                             type="button"
-                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors outline-none border-0"
+                            onClick={() => handleDecision(u.user_id, "approve")}
+                            disabled={actioningId === u.user_id}
+                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors outline-none border-0 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Accept
+                            {actioningId === u.user_id ? "..." : "Accept"}
                         </button>
 
                         {/* Decline Button - Red Border & Red Text */}
                         <button
                             type="button"
-                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-red-500 hover:text-red-400 bg-transparent hover:bg-red-500/10 border border-red-500/60 hover:border-red-500 rounded-xl transition-colors outline-none"
+                            onClick={() => handleDecision(u.user_id, "decline")}
+                            disabled={actioningId === u.user_id}
+                            className="w-24 h-9 flex items-center justify-center text-sm font-semibold text-red-500 hover:text-red-400 bg-transparent hover:bg-red-500/10 border border-red-500/60 hover:border-red-500 rounded-xl transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            Decline
+                            {actioningId === u.user_id ? "..." : "Decline"}
                         </button>
                     </div>
-                  </td>
+                </td>
                 </tr>
               ))}
             </tbody>

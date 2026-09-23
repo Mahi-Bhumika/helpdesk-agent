@@ -359,15 +359,50 @@ _GREETING_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-def is_smalltalk(question: str) -> bool:
+_ACKNOWLEDGMENT_PATTERNS = re.compile(
+    r"^\s*(thanks?|thank\s?you+|thx|ty|tysm|ok(ay)?|okie|got\s?it|cool|great|perfect|"
+    r"alright|sounds\s?good|awesome|nice(\s?one)?|sure|no\s?problem|np)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def classify_smalltalk(question: str) -> Optional[str]:
     """
-    Detects short greeting-only messages so we can skip retrieval
-    and answer naturally instead of dumping document context.
+    Detects short messages that shouldn't go through retrieval at all.
+    Returns 'greeting', 'acknowledgment', or None (meaning: run retrieval
+    normally). Kept as two categories, not one, because they need
+    different canned replies — repeating the greeting message back at
+    someone who just said "thanks" reads as broken, not helpful.
     """
     q = question.strip()
     if len(q) > 25:
+        return None
+    if _GREETING_PATTERNS.match(q):
+        return "greeting"
+    if _ACKNOWLEDGMENT_PATTERNS.match(q):
+        return "acknowledgment"
+    return None
+
+
+_FOLLOWUP_PATTERNS = re.compile(
+    r"^\s*(what\s?else|tell\s?me\s?more|more\s?info(rmation)?|and\s?(then|more)?|why|"
+    r"go\s?on|continue|anything\s?else|what\s?about\s?(that|it|those)?|explain\s?more|"
+    r"elaborate|more\s?details?|keep\s?going)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def is_followup(question: str) -> bool:
+    """
+    Detects short, context-dependent follow-ups ("what else", "tell me
+    more", "why") that carry almost no standalone semantic content — if
+    embedded and searched as-is, they score below the similarity
+    threshold against every real chunk and force a false fallback, even
+    though the LLM would have understood the question fine given the
+    conversation history it already receives.
+    """
+    q = question.strip()
+    if len(q) > 30:
         return False
-    return bool(_GREETING_PATTERNS.match(q))
+    return bool(_FOLLOWUP_PATTERNS.match(q))
 
 
 
@@ -430,11 +465,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Greeting check — BEFORE retrieval, so a "hi" never pays for
-    # an embedding call or a vector search. Uses is_smalltalk() (regex,
-    # handles punctuation) instead of an exact-match set.
-    if is_smalltalk(query.question):
-        greeting_msg = tenant.greeting_message or "Hello! How can I help you today?"
+    # Step 2: Smalltalk check — BEFORE retrieval, so a greeting or a plain
+    # "thanks"/"okay" never pays for an embedding call or a vector search.
+    # Two separate replies: repeating the greeting message back at someone
+    # who just said "thanks" would read as broken, not helpful.
+    smalltalk_kind = classify_smalltalk(query.question)
+    if smalltalk_kind:
+        if smalltalk_kind == "greeting":
+            reply = tenant.greeting_message or "Hello! How can I help you today?"
+        else:  # "acknowledgment"
+            reply = "You're welcome! Let me know if there's anything else I can help with."
 
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
@@ -442,11 +482,11 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
         )
         await db.commit()
 
-        return ChatResponse(session_id=str(session_id), answer=greeting_msg, sources=[])
+        return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
     # Step 3: Fetch last 6 messages from conversation history for memory
     history_result = await db.execute(
@@ -462,7 +502,25 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     history_rows = list(reversed(history_result.fetchall()))
 
     # Step 4: Query vector store using Cosine Distance operator (<=>)
-    query_embedding = embed_chunks([query.question])[0]
+    #
+    # For a genuine follow-up ("tell me more", "why") the raw text alone
+    # has almost no semantic content to embed — it scores below the
+    # similarity threshold against every real chunk regardless of how
+    # relevant the actual topic is, forcing a false fallback. Augment
+    # ONLY the retrieval query (never what's shown to the LLM below) with
+    # the most recent real user question and bot answer, so the vector
+    # search has something concrete to match against. Ordinary, specific
+    # questions are left untouched — blending in prior context there
+    # would risk dragging in irrelevant chunks from an earlier topic.
+    retrieval_query_text = query.question
+    if is_followup(query.question) and history_rows:
+        last_user = next((h.content for h in reversed(history_rows) if h.sender == "user"), None)
+        last_bot = next((h.content for h in reversed(history_rows) if h.sender == "bot"), None)
+        context_bits = [bit for bit in (last_user, last_bot) if bit]
+        if context_bits:
+            retrieval_query_text = " ".join(context_bits) + " " + query.question
+
+    query_embedding = embed_chunks([retrieval_query_text])[0]
 
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
@@ -512,6 +570,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     llm_messages.append({"role": "user", "content": user_prompt})
 
     print(f"[DEBUG] Question: {query.question}")
+    if retrieval_query_text != query.question:
+        print(f"[DEBUG] Retrieval query (follow-up augmented): {retrieval_query_text}")
     print(f"[DEBUG] Context sent to LLM:\n{context}")
 
     completion = groq_client.chat.completions.create(

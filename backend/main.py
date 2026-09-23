@@ -115,7 +115,6 @@ async def update_document(
 # POST — create a new document
 class DocumentCreate(BaseModel):
     tenant_id: str
-    uploaded_by: Optional[str] = None
     file_url: Optional[str] = None
     format: Optional[str] = None
     theme: Optional[str] = None
@@ -135,7 +134,12 @@ async def create_document(
         VALUES (:tenant_id, :uploaded_by, :file_url, :format, :theme)
         RETURNING document_id, tenant_id, status, created_at
     """)
-    result = await db.execute(query, doc.model_dump())
+    result = await db.execute(query, {
+        **doc.model_dump(),
+        # server-derived from the verified JWT, never trusted from the client —
+        # same pattern already used for tenant_id elsewhere in this file
+        "uploaded_by": current_user["user_id"],
+    })
     await db.commit()
     return dict(result.fetchone()._mapping)
 
@@ -235,6 +239,16 @@ async def upload_document(
     if tenant_id != current_user["tenant_id"]:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
+    # Flip to 'processing' immediately, committed on its own — this is the
+    # real status while parsing/chunking/embedding are running, rather than
+    # jumping straight from 'uploaded' to 'ready'/'failed' with a long silent
+    # gap. Uploaded (POST /documents) -> Processing (this line) -> Ready/Failed.
+    await db.execute(
+        text("UPDATE documents SET status = 'processing' WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+    await db.commit()
+
     # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         contents = await file.read()
@@ -243,7 +257,20 @@ async def upload_document(
 
     try:
         t0 = time.time()
-        extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        try:
+            extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        except ValueError as e:
+            # extract_text() raises ValueError for two distinct real failures:
+            # a corrupted/unreadable PDF, or a fully-scanned document with zero
+            # extractable text on any page. Both are genuine upload failures,
+            # not a 500 — surface them clearly and mark the document as failed
+            # instead of letting an unhandled exception fall through.
+            await db.execute(
+                text("UPDATE documents SET status = 'failed' WHERE document_id = :document_id"),
+                {"document_id": document_id},
+            )
+            await db.commit()
+            raise HTTPException(status_code=422, detail=str(e))
         print(f"extract_text took {time.time() - t0:.2f}s")
 
         t1 = time.time()
@@ -290,6 +317,15 @@ async def upload_document(
         ]
 
         await db.execute(insert_query, rows)
+
+        # Mark the document ready in the SAME transaction as the chunk inserts,
+        # so status only ever reflects reality — this update was missing
+        # entirely before, leaving every successful upload's status stuck
+        # wherever it started (e.g. permanently 'uploading').
+        await db.execute(
+            text("UPDATE documents SET status = 'ready' WHERE document_id = :document_id"),
+            {"document_id": document_id},
+        )
         await db.commit()
 
     finally:

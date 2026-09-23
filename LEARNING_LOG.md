@@ -1245,3 +1245,106 @@ No code — shared click-through day with Mahi: every dashboard page (owner + me
 
 - Sessions + Analytics merge (discussed with a mockup) — parked pending a sync with Mahi, since it changes her Day 2/3 scope too
 
+## Decisions audit + security hardening (Bhumika)
+
+Went through the running list of deferred decisions and flagged gaps from
+Weeks 4–6 before touching any Docker/CI work, since a couple of them
+(git workflow, CORS) directly affect what Wednesday's `backend.yml`/
+`frontend.yml` would actually be gating.
+
+### Decisions closed today
+
+- **Git workflow**: PRs required on `main`, gated on CI passing. Workflow
+  YAML files themselves also go through the same PR gate — closes the
+  hole where a broken change could ship in the same PR that quietly
+  loosens the required check.
+- **CORS**: confirmed Option A (global wildcard `CORSMiddleware`) is what
+  actually shipped, not Option B as I'd first assumed. Clarified why
+  that's still fine: the wildcard only controls whether the browser lets
+  JS read the response — it was never the real security boundary. The
+  actual protection on `/chat` is the separate `extract_origin()` check
+  built in Week 6, sitting inside the route handler independent of the
+  CORS middleware. Documenting this explicitly so it isn't re-litigated
+  later thinking "wildcard CORS" means "no origin protection."
+- **Declined page**: confirmed already working end-to-end (tested Week 4
+  Sunday); gave it the obsidian/glassmorphism pass today for visual
+  consistency with the rest of the dashboard — `GlassCard`/`Button`
+  reused, no logic touched.
+- **Sessions/Analytics merge**: decided against — staying separate
+  permanently, not just parked.
+- **Seeded dummy data for Analytics**: decided *not* needed. Checked the
+  two things that would've made a demo look thin — date spread across
+  `chat_sessions` (confirmed multiple days, not a single spike) and CSAT
+  coverage on real sessions (confirmed populated, since `/chat/end` has
+  been writing to it since Week 6). Real usage data reads better than
+  seeded rows anyway.
+- **Decline reversibility**: confirmed one-way by design, staying that
+  way — a declined user's invite-token re-click and normal login both
+  correctly stay locked out rather than re-queuing to pending.
+- **Login/Signup/Pending theming**: formally deferred past Week 7 rather
+  than left ambiguous — not demo-critical, no one screenshots the login
+  page.
+
+### Security items
+
+- **Members page RLS**: turned out to already be handled — a real
+  `SECURITY DEFINER`-backed policy (`"Owners can read all users in their
+  tenant"`, SELECT, on `public`) already exists and is what the page
+  pulls from. Not a gap after all; earlier concern was based on stale
+  info.
+- **`users.status` CHECK constraint**: added, mirroring the `users.role`
+  constraint from Week 2. Worth spelling out *why* this one actually
+  matters beyond "typos are bad" — `status` gates real logic in four
+  already-shipped features: the login 3-way branch (`/dashboard` vs
+  `/pending` vs `/declined`), the Accept/Decline atomic `UPDATE ...
+  WHERE status = 'pending'` clause that's what makes the double-click
+  race condition safe, the `is_active_user()` RLS helper other policies
+  trust, and the 15s pending-screen poll. Every one of those compares
+  against an exact literal string with zero tolerance for a typo'd or
+  wrong-case value — same silent-failure shape as the RLS
+  zero-policy-returns-nothing pattern that's bitten this project twice
+  already. Confirmed via `SELECT DISTINCT status FROM users` that only
+  the three expected values exist before applying the constraint.
+- **CORS `allow_methods`**: confirmed `PUT` and `DELETE` are both
+  already present (added reactively back in Week 6 after the
+  website-domain save 403'd). Audited ahead of building the proposed
+  `PATCH /sessions/{id}/feedback` endpoint instead of waiting for it to
+  break a third time the same way.
+
+### Process items (Item 5) — closed vs. deferred
+
+- **Env var checks (backend + frontend)**: proposed a `Settings`/`env.ts`
+  pattern to fail loudly at startup/build instead of silently
+  propagating `None`, but decided **not** to build it — all current env
+  var values are already cohesive across both sides, so the actual risk
+  this would guard against isn't present right now. Worth revisiting if
+  a new required var gets added later without matching names on both
+  sides.
+- **Clean-install CI step**: no new work needed — Wednesday's
+  `backend.yml`/`frontend.yml` already run in a fresh GitHub runner by
+  construction, which structurally prevents the "worked locally, missing
+  from the manifest" bug class (hit 3 times: `sentence_transformers`,
+  `python-multipart`, `recharts`).
+- **Smaller diffs / review before merge**: covered by the PR-required
+  decision above — visible diffs before merge is what actually lets
+  someone catch a duplicate-pasted-block bug (hit 6 times across the
+  project) before it lands, not after.
+- **CI test gate**: Monday's pytest suite (`/health`, `/tenants`,
+  `/chat` smoke tests) needs to be wired as a *required* status check on
+  `main`'s branch protection rule, not just a workflow that runs and
+  reports — writing tests alone doesn't block a bad merge without that
+  setting. `cross_tenant_attack_test.py` stays a manual pre-deploy step
+  (Sunday regression), not a CI gate, since it needs live two-tenant
+  seeded data a PR-triggered run doesn't have.
+- Mahi's Week 7 backend/Docker work hasn't started yet — the `Settings`
+  question (if revisited) and the CI-gate wiring both depend on her
+  side landing first.
+
+### Where this leaves things
+
+All open decisions from the Week 6 handoff are now closed, one way or
+another, rather than sitting ambiguous going into Docker/CI week.
+Members RLS turned out to be a non-issue on closer inspection — worth
+remembering as its own small lesson: confirm the actual current state
+(`pg_policies`, in this case) before treating a suspected gap as
+confirmed and building a fix for it blind.

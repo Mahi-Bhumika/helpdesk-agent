@@ -1,8 +1,6 @@
-
 from fastapi import UploadFile, File, Form
 import tempfile
-import os
-import os as os_module  # avoid clashing with your existing `os` usage if any
+import os as os_module
 
 import time
 
@@ -32,7 +30,10 @@ groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
 app = FastAPI()
 
-# --- CORS: allow the frontend (local + deployed) to call this backend ---
+# --- CORS: Option A (wildcard) — confirmed as the shipped configuration. ---
+# /chat and /kb/upload are protected by their own rate-limiting, Origin checks,
+# and JWT/tenant scoping, so a permissive CORS layer here is an accepted tradeoff,
+# not an oversight. Revisit only if credentialed cross-origin requests are ever needed.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -67,7 +68,7 @@ async def get_document(
     if row is None:
         raise HTTPException(status_code=404, detail="Document not found")
     doc = dict(row._mapping)
-    if str(doc["tenant_id"]) != current_user["tenant_id"]:  # ← wrap in str()
+    if str(doc["tenant_id"]) != current_user["tenant_id"]:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
     return doc
 
@@ -114,7 +115,6 @@ async def update_document(
 # POST — create a new document
 class DocumentCreate(BaseModel):
     tenant_id: str
-    uploaded_by: Optional[str] = None
     file_url: Optional[str] = None
     format: Optional[str] = None
     theme: Optional[str] = None
@@ -134,15 +134,14 @@ async def create_document(
         VALUES (:tenant_id, :uploaded_by, :file_url, :format, :theme)
         RETURNING document_id, tenant_id, status, created_at
     """)
-    result = await db.execute(query, doc.model_dump())
+    result = await db.execute(query, {
+        **doc.model_dump(),
+        # server-derived from the verified JWT, never trusted from the client —
+        # same pattern already used for tenant_id elsewhere in this file
+        "uploaded_by": current_user["user_id"],
+    })
     await db.commit()
     return dict(result.fetchone()._mapping)
-
-
-
-
-
-
 
 
 @app.get("/db-check")
@@ -161,13 +160,12 @@ class TenantCreate(BaseModel):
     bot_name: Optional[str] = None
     greeting_message: Optional[str] = None
     theme_color: Optional[str] = None
-    fallback_message: Optional[str] = None  # <--- MISSING HERE
+    fallback_message: Optional[str] = None
+
 
 @app.get("/tenants/{tenant_id}/widget-config")
 async def get_widget_config(tenant_id: str, db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(f"widget-config:{tenant_id}", max_requests=60, window_seconds=60.0)
-
-    # UPDATE THIS QUERY:
 
     result = await db.execute(
         text("""
@@ -179,12 +177,16 @@ async def get_widget_config(tenant_id: str, db: AsyncSession = Depends(get_db)):
     )
     tenant = result.fetchone()
 
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
     return {
         "bot_name": tenant.bot_name,
         "greeting_message": tenant.greeting_message,
         "theme_color": tenant.theme_color,
-        "fallback_message": tenant.fallback_message,  # <--- MISSING HERE
+        "fallback_message": tenant.fallback_message,
     }
+
 
 @app.post("/tenants")
 async def create_tenant(
@@ -197,12 +199,12 @@ async def create_tenant(
 
     tenant_query = text("""
     INSERT INTO tenants (
-        company_name, type_of_business, subscription_plan, 
-        bot_name, greeting_message, theme_color, fallback_message  -- <--- MISSING HERE
+        company_name, type_of_business, subscription_plan,
+        bot_name, greeting_message, theme_color, fallback_message
     )
     VALUES (
-        :company_name, :type_of_business, :subscription_plan, 
-        :bot_name, :greeting_message, :theme_color, :fallback_message -- <--- MISSING HERE
+        :company_name, :type_of_business, :subscription_plan,
+        :bot_name, :greeting_message, :theme_color, :fallback_message
     )
     RETURNING tenant_id, company_name, invite_token, created_at
 """)
@@ -237,7 +239,17 @@ async def upload_document(
     if tenant_id != current_user["tenant_id"]:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
-    # ...rest of the function unchanged from here down    # Save the uploaded file to a temp path so pdfplumber can read it
+    # Flip to 'processing' immediately, committed on its own — this is the
+    # real status while parsing/chunking/embedding are running, rather than
+    # jumping straight from 'uploaded' to 'ready'/'failed' with a long silent
+    # gap. Uploaded (POST /documents) -> Processing (this line) -> Ready/Failed.
+    await db.execute(
+        text("UPDATE documents SET status = 'processing' WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+    await db.commit()
+
+    # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         contents = await file.read()
         tmp.write(contents)
@@ -245,7 +257,20 @@ async def upload_document(
 
     try:
         t0 = time.time()
-        extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        try:
+            extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        except ValueError as e:
+            # extract_text() raises ValueError for two distinct real failures:
+            # a corrupted/unreadable PDF, or a fully-scanned document with zero
+            # extractable text on any page. Both are genuine upload failures,
+            # not a 500 — surface them clearly and mark the document as failed
+            # instead of letting an unhandled exception fall through.
+            await db.execute(
+                text("UPDATE documents SET status = 'failed' WHERE document_id = :document_id"),
+                {"document_id": document_id},
+            )
+            await db.commit()
+            raise HTTPException(status_code=422, detail=str(e))
         print(f"extract_text took {time.time() - t0:.2f}s")
 
         t1 = time.time()
@@ -292,6 +317,15 @@ async def upload_document(
         ]
 
         await db.execute(insert_query, rows)
+
+        # Mark the document ready in the SAME transaction as the chunk inserts,
+        # so status only ever reflects reality — this update was missing
+        # entirely before, leaving every successful upload's status stuck
+        # wherever it started (e.g. permanently 'uploading').
+        await db.execute(
+            text("UPDATE documents SET status = 'ready' WHERE document_id = :document_id"),
+            {"document_id": document_id},
+        )
         await db.commit()
 
     finally:
@@ -325,15 +359,50 @@ _GREETING_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-def is_smalltalk(question: str) -> bool:
+_ACKNOWLEDGMENT_PATTERNS = re.compile(
+    r"^\s*(thanks?|thank\s?you+|thx|ty|tysm|ok(ay)?|okie|got\s?it|cool|great|perfect|"
+    r"alright|sounds\s?good|awesome|nice(\s?one)?|sure|no\s?problem|np)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def classify_smalltalk(question: str) -> Optional[str]:
     """
-    Detects short greeting-only messages so we can skip retrieval
-    and answer naturally instead of dumping document context.
+    Detects short messages that shouldn't go through retrieval at all.
+    Returns 'greeting', 'acknowledgment', or None (meaning: run retrieval
+    normally). Kept as two categories, not one, because they need
+    different canned replies — repeating the greeting message back at
+    someone who just said "thanks" reads as broken, not helpful.
     """
     q = question.strip()
     if len(q) > 25:
+        return None
+    if _GREETING_PATTERNS.match(q):
+        return "greeting"
+    if _ACKNOWLEDGMENT_PATTERNS.match(q):
+        return "acknowledgment"
+    return None
+
+
+_FOLLOWUP_PATTERNS = re.compile(
+    r"^\s*(what\s?else|tell\s?me\s?more|more\s?info(rmation)?|and\s?(then|more)?|why|"
+    r"go\s?on|continue|anything\s?else|what\s?about\s?(that|it|those)?|explain\s?more|"
+    r"elaborate|more\s?details?|keep\s?going)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def is_followup(question: str) -> bool:
+    """
+    Detects short, context-dependent follow-ups ("what else", "tell me
+    more", "why") that carry almost no standalone semantic content — if
+    embedded and searched as-is, they score below the similarity
+    threshold against every real chunk and force a false fallback, even
+    though the LLM would have understood the question fine given the
+    conversation history it already receives.
+    """
+    q = question.strip()
+    if len(q) > 30:
         return False
-    return bool(_GREETING_PATTERNS.match(q))
+    return bool(_FOLLOWUP_PATTERNS.match(q))
 
 
 
@@ -352,6 +421,12 @@ class ChatResponse(BaseModel):
     session_id: str
     answer: str
     sources: list[ChatSource]
+
+# Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
+# this (1 - cosine_distance) are treated as not relevant enough to answer from.
+SIMILARITY_THRESHOLD = 0.35
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
@@ -390,11 +465,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Greeting check — BEFORE retrieval, so a "hi" never pays for
-    # an embedding call or a vector search. Uses is_smalltalk() (regex,
-    # handles punctuation) instead of an exact-match set.
-    if is_smalltalk(query.question):
-        greeting_msg = tenant.greeting_message or "Hello! How can I help you today?"
+    # Step 2: Smalltalk check — BEFORE retrieval, so a greeting or a plain
+    # "thanks"/"okay" never pays for an embedding call or a vector search.
+    # Two separate replies: repeating the greeting message back at someone
+    # who just said "thanks" would read as broken, not helpful.
+    smalltalk_kind = classify_smalltalk(query.question)
+    if smalltalk_kind:
+        if smalltalk_kind == "greeting":
+            reply = tenant.greeting_message or "Hello! How can I help you today?"
+        else:  # "acknowledgment"
+            reply = "You're welcome! Let me know if there's anything else I can help with."
 
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
@@ -402,11 +482,11 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
         )
         await db.commit()
 
-        return ChatResponse(session_id=str(session_id), answer=greeting_msg, sources=[])
+        return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
     # Step 3: Fetch last 6 messages from conversation history for memory
     history_result = await db.execute(
@@ -422,7 +502,25 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     history_rows = list(reversed(history_result.fetchall()))
 
     # Step 4: Query vector store using Cosine Distance operator (<=>)
-    query_embedding = embed_chunks([query.question])[0]
+    #
+    # For a genuine follow-up ("tell me more", "why") the raw text alone
+    # has almost no semantic content to embed — it scores below the
+    # similarity threshold against every real chunk regardless of how
+    # relevant the actual topic is, forcing a false fallback. Augment
+    # ONLY the retrieval query (never what's shown to the LLM below) with
+    # the most recent real user question and bot answer, so the vector
+    # search has something concrete to match against. Ordinary, specific
+    # questions are left untouched — blending in prior context there
+    # would risk dragging in irrelevant chunks from an earlier topic.
+    retrieval_query_text = query.question
+    if is_followup(query.question) and history_rows:
+        last_user = next((h.content for h in reversed(history_rows) if h.sender == "user"), None)
+        last_bot = next((h.content for h in reversed(history_rows) if h.sender == "bot"), None)
+        context_bits = [bit for bit in (last_user, last_bot) if bit]
+        if context_bits:
+            retrieval_query_text = " ".join(context_bits) + " " + query.question
+
+    query_embedding = embed_chunks([retrieval_query_text])[0]
 
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
@@ -438,10 +536,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     })
     rows = result.fetchall()
 
-    # Step 5: Filter chunks using Similarity Threshold
-    SIMILARITY_THRESHOLD = 0.40
+    # Step 5: Filter chunks using the similarity threshold
     retrieved_chunks = [
-        dict(row._mapping) for row in rows 
+        dict(row._mapping) for row in rows
         if (1 - row.distance) >= SIMILARITY_THRESHOLD
     ]
 
@@ -472,10 +569,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
     llm_messages.append({"role": "user", "content": user_prompt})
 
+    print(f"[DEBUG] Question: {query.question}")
+    if retrieval_query_text != query.question:
+        print(f"[DEBUG] Retrieval query (follow-up augmented): {retrieval_query_text}")
+    print(f"[DEBUG] Context sent to LLM:\n{context}")
+
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=llm_messages,
     )
+
     answer = completion.choices[0].message.content
 
     # Step 7: Save current turn to DB
@@ -516,14 +619,34 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     await db.commit()
 
     return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
+
+
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str
     csat: Optional[int] = Field(None, ge=1, le=5)
 
+
 @app.post("/chat/end")
-async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
-    # Verify session exists
+async def end_chat(
+    payload: EndChatRequest,
+    origin: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    # Same Origin check as /chat — ending/rating a session is still an action
+    # tied to a specific tenant's own widget, not something an arbitrary script
+    # with a guessed session_id should be able to trigger.
+    tenant_row = await db.execute(
+        text("SELECT website_domain FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"),
+        {"tid": payload.tenant_id},
+    )
+    tenant = tenant_row.fetchone()
+    if not tenant or not tenant.website_domain:
+        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
+    if not origin or extract_origin(tenant.website_domain) != origin:
+        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
+
+    # Verify session exists and belongs to this tenant
     session_result = await db.execute(
         text("""
             SELECT session_id 
@@ -535,7 +658,10 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
     if not session_result.fetchone():
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Update status, save csat, and set ending timestamp
+    # Update status, save csat, and set ending timestamp.
+    # end_datetime is only ever written here — a session's status is derived
+    # solely from whether this has run (i.e. the visitor clicked "End Chat"),
+    # never from a last-activity heuristic.
     await db.execute(
         text("""
             UPDATE chat_sessions
@@ -554,29 +680,6 @@ async def end_chat(payload: EndChatRequest, db: AsyncSession = Depends(get_db)):
 
     return {"status": "success", "message": "Chat session ended"}
 
-from pydantic import BaseModel
-
-class FeedbackPayload(BaseModel):
-    session_id: str
-    rating: int  # 1 to 5
-
-@app.post("/chat/feedback")
-async def record_feedback(
-    payload: FeedbackPayload,
-    db: AsyncSession = Depends(get_db),
-):
-    await db.execute(
-        text("""
-            UPDATE chat_sessions
-            SET 
-                customer_satisfaction = :rating,
-                end_datetime = NOW()
-            WHERE session_id = CAST(:session_id AS uuid)
-        """),
-        {"session_id": payload.session_id, "rating": payload.rating},
-    )
-    await db.commit()
-    return {"status": "success"}
 
 class WebsiteDomainUpdate(BaseModel):
     website_domain: str
@@ -651,10 +754,11 @@ async def accept_invite(
     await db.commit()
     return {"status": "pending", "tenant_id": str(tenant_row.tenant_id)}
 
+
 class UserActionRequest(BaseModel):
     user_id: str
 
-    
+
 @app.get("/admin/pending-users")
 async def get_pending_users(
     current_user: dict = Depends(get_current_user),
@@ -702,6 +806,7 @@ async def approve_user(
 
     return dict(row._mapping)
 
+
 @app.post("/admin/decline-user")
 async def decline_user(
     payload: UserActionRequest,
@@ -728,47 +833,70 @@ async def decline_user(
 
     return dict(row._mapping)
 
+
 @app.get("/sessions")
 async def list_sessions(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     min_csat: Optional[int] = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    query_str = """
+    # Status is derived purely from end_datetime: NULL means the visitor never
+    # clicked "End Chat" (still Ongoing), non-NULL means /chat/end ran (Completed).
+    # No last-message-activity heuristic — that was a stopgap from before
+    # /chat/end reliably wrote a real end_datetime, and is no longer needed.
+    base_where = "WHERE cs.tenant_id = CAST(:tenant_id AS uuid)"
+    params = {"tenant_id": current_user["tenant_id"]}
+
+    if start_date:
+        base_where += " AND cs.start_datetime >= :start_date::timestamp"
+        params["start_date"] = start_date
+    if end_date:
+        base_where += " AND cs.start_datetime <= :end_date::timestamp"
+        params["end_date"] = end_date
+    if min_csat:
+        base_where += " AND cs.customer_satisfaction >= :min_csat"
+        params["min_csat"] = min_csat
+
+    query_str = f"""
         SELECT
             cs.session_id,
             cs.start_datetime,
             cs.end_datetime,
             cs.customer_satisfaction,
             COUNT(m.message_id) AS message_count,
-            MAX(m.created_at) AS last_message_at
+            CASE WHEN cs.end_datetime IS NULL THEN 'Ongoing' ELSE 'Completed' END AS status
         FROM chat_sessions cs
         LEFT JOIN messages m ON m.session_id = cs.session_id
-        WHERE cs.tenant_id = CAST(:tenant_id AS uuid)
-    """
-    params = {"tenant_id": current_user["tenant_id"]}
-
-    if start_date:
-        query_str += " AND cs.start_datetime >= :start_date::timestamp"
-        params["start_date"] = start_date
-    if end_date:
-        query_str += " AND cs.start_datetime <= :end_date::timestamp"
-        params["end_date"] = end_date
-    if min_csat:
-        query_str += " AND cs.customer_satisfaction >= :min_csat"
-        params["min_csat"] = min_csat
-
-    query_str += """
+        {base_where}
         GROUP BY cs.session_id
         ORDER BY cs.start_datetime DESC
-        LIMIT 100
+        LIMIT :limit OFFSET :offset
     """
+    params["limit"] = limit
+    params["offset"] = offset
 
     result = await db.execute(text(query_str), params)
     rows = result.fetchall()
-    return [dict(row._mapping) for row in rows]
+
+    count_query_str = f"""
+        SELECT COUNT(DISTINCT cs.session_id)
+        FROM chat_sessions cs
+        {base_where}
+    """
+    count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+    total_result = await db.execute(text(count_query_str), count_params)
+    total = total_result.scalar()
+
+    return {
+        "sessions": [dict(row._mapping) for row in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/sessions/{session_id}/messages")

@@ -39,7 +39,10 @@ export default function SessionsListPage() {
                 const query = params.toString() ? `?${params.toString()}` : "";
                 const res = await authedFetch(`/sessions${query}`, { method: "GET" });
                 if (!res.ok) throw new Error(`Failed to load sessions (HTTP ${res.status})`);
-                setSessions(await res.json());
+                
+                const data = await res.json();
+                // Safely store the sessions array in state
+                setSessions(Array.isArray(data) ? data : (data?.sessions || []));
             } catch (err) {
                 setError(err instanceof Error ? err.message : "Something went wrong.");
             } finally {
@@ -61,7 +64,7 @@ export default function SessionsListPage() {
     // Calculate aggregated CSAT statistics
     const ratedSessions = sessions.filter((s) => s.customer_satisfaction != null);
     const avgCsat = ratedSessions.length > 0
-        ? (ratedSessions.reduce((acc, s) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length).toFixed(1)
+        ? (ratedSessions.reduce((acc, s) => acc + (s.customer_satisfaction || 0), 0) / ratedSessions.length)
         : null;
 
     return (
@@ -74,7 +77,7 @@ export default function SessionsListPage() {
                     <p className="text-xs text-text-secondary">Average CSAT</p>
                     <div className="flex items-baseline gap-2 mt-1">
                         <span className="text-2xl font-bold text-text-primary">
-                            {avgCsat ? `${avgCsat} ★` : "—"}
+                            {avgCsat ? avgCsat.toFixed(1) : "N/A"}                        
                         </span>
                         <span className="text-xs text-text-muted">/ 5.0</span>
                     </div>
@@ -175,7 +178,7 @@ export default function SessionsListPage() {
                                     ) : (
                                         <PillBadge status="active" label="Ongoing" />
                                     )}
-                                    </td>                                    
+                                    </td>                                        
                                     <td className="py-3 font-medium">
                                         {s.customer_satisfaction != null ? (
                                             <span className="text-amber-400">

@@ -2,6 +2,7 @@
 
 import { useDropzone } from "react-dropzone";
 import { useEffect, useState, useCallback } from "react";
+import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import { authedFetch } from "@/lib/api";
@@ -54,6 +55,7 @@ export default function DocumentsPage() {
     const [docs, setDocs] = useState<Doc[]>([]);
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [deletingId, setDeletingId] = useState<string | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
@@ -69,9 +71,27 @@ export default function DocumentsPage() {
     }, [tenantId]);
 
     useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
         fetchDocs();
     }, [fetchDocs]);
+
+    const handleDelete = async (documentId: string, filename: string | null) => {
+        const label = filename ?? "this document";
+        if (!window.confirm(`Delete "${label}"? This can't be undone.`)) return;
+
+        setDeletingId(documentId);
+        setErrorMessage(null);
+        try {
+            const res = await authedFetch(`/documents/${documentId}`, { method: "DELETE" });
+            if (!res.ok) throw new Error(`Failed to delete document (${res.status})`);
+            // Optimistic removal — don't wait on a full refetch for a doc we know is gone
+            setDocs((prev) => prev.filter((d) => d.document_id !== documentId));
+        } catch (err) {
+            setErrorMessage(err instanceof Error ? err.message : "Failed to delete document.");
+        } finally {
+            setDeletingId(null);
+        }
+    };
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
@@ -221,6 +241,7 @@ export default function DocumentsPage() {
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Category</th>
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Status</th>
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Uploaded</th>
+                                        <th className="px-6 py-4 text-xs font-medium text-text-secondary text-right">Remove</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -231,6 +252,21 @@ export default function DocumentsPage() {
                                             <td className="px-6 py-4"><StatusPill status={doc.status} /></td>
                                             <td className="px-6 py-4 text-sm text-text-secondary">
                                                 {new Date(doc.created_at).toLocaleString()}
+                                            </td>
+                                            <td className="px-6 py-4 text-right">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleDelete(doc.document_id, doc.file_url)}
+                                                    disabled={deletingId === doc.document_id}
+                                                    aria-label={`Delete ${doc.file_url ?? "document"}`}
+                                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-text-muted hover:text-status-declined hover:bg-status-declinedSoft transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    {deletingId === doc.document_id ? (
+                                                        <span className="text-xs">…</span>
+                                                    ) : (
+                                                        <X className="h-4 w-4" />
+                                                    )}
+                                                </button>
                                             </td>
                                         </tr>
                                     ))}

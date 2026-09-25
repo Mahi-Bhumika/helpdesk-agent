@@ -47,6 +47,7 @@ export default function SessionsListPage() {
                 // contract so this fallback can eventually be removed.
                 const data: SessionSummary[] | { sessions: SessionSummary[] } = await res.json();
                 setSessions(Array.isArray(data) ? data : data.sessions ?? []);
+
             } catch (err) {
                 setError(err instanceof Error ? err.message : "Something went wrong.");
             } finally {
@@ -65,6 +66,7 @@ export default function SessionsListPage() {
         });
     }
 
+
     // Calculate aggregated CSAT statistics — `sessions` is always a clean
     // SessionSummary[] now, so no runtime shape-guard or `any` needed here.
     const ratedSessions = sessions.filter((s) => s.customer_satisfaction != null);
@@ -82,6 +84,7 @@ export default function SessionsListPage() {
                     <p className="text-xs text-text-secondary">Average CSAT</p>
                     <div className="flex items-baseline gap-2 mt-1">
                         <span className="text-2xl font-bold text-text-primary">
+
                             {avgCsat ? avgCsat.toFixed(1) : "N/A"}
                         </span>
                         <span className="text-xs text-text-muted">/ 5.0</span>

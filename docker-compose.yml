@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  db:
+    # Prebuilt image with pgvector already compiled in — no manual
+    # `CREATE EXTENSION` step needed, unlike your Supabase setup.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: helpdesk_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Auto-runs on first container start only. Requires backend/schema.sql
+      # to actually exist — this was flagged as a gap back in Week 1
+      # ("worth copying the CREATE TABLE SQL into a schema.sql file").
+      # If you never did that, do it now — this is exactly why it matters.
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      # Local-only secrets (GROQ_API_KEY etc). Separate from the real .env
+      # used for Render — gitignore this file too.
+      - ./backend/.env.docker
+    environment:
+      # Points at the local `db` service, NOT Supabase — this is the whole
+      # point of dev/prod parity without touching production data.
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/helpdesk_agent
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+volumes:
+  pgdata:

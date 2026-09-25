@@ -48,6 +48,8 @@ function StatusPill({ status }: { status: string }) {
     );
 }
 
+const STATUS_POLL_INTERVAL_MS = 1500;
+
 export default function DocumentsPage() {
     const { tenantId } = useAuth();
     const [theme, setTheme] = useState("");
@@ -55,11 +57,11 @@ export default function DocumentsPage() {
     const [docs, setDocs] = useState<Doc[]>([]);
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
     const [deletingId, setDeletingId] = useState<string | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
-        setLoadingDocs(true);
         const { data, error } = await supabase
             .from("documents")
             .select("document_id, file_url, format, theme, status, created_at")
@@ -67,7 +69,6 @@ export default function DocumentsPage() {
             .order("created_at", { ascending: false });
 
         if (!error && data) setDocs(data as Doc[]);
-        setLoadingDocs(false);
     }, [tenantId]);
 
     useEffect(() => {
@@ -92,7 +93,7 @@ export default function DocumentsPage() {
             setDeletingId(null);
         }
     };
-
+        
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
         disabled: !theme.trim() || status === "uploading",
@@ -116,6 +117,13 @@ export default function DocumentsPage() {
                 if (!createRes.ok) throw new Error("Failed to create document record");
                 const created = await createRes.json();
                 const documentId = created.document_id;
+
+                // Show the new row right away (status: 'uploaded'), then poll
+                // while the pipeline runs so 'processing' is actually visible
+                // instead of being invisibly skipped between one fetch before
+                // the upload and one fetch after it.
+                await fetchDocs();
+                pollRef.current = setInterval(fetchDocs, STATUS_POLL_INTERVAL_MS);
 
                 const formData = new FormData();
                 formData.append("document_id", documentId);
@@ -141,10 +149,19 @@ export default function DocumentsPage() {
 
                 setStatus("success");
                 setTheme("");
-                await fetchDocs();
             } catch (err) {
                 setStatus("error");
                 setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+            } finally {
+                // Always stop polling and do one guaranteed final fetch, on
+                // both success and failure — previously a failed upload never
+                // refetched at all, so a 'failed' row silently didn't appear
+                // until the next manual page reload.
+                if (pollRef.current) {
+                    clearInterval(pollRef.current);
+                    pollRef.current = null;
+                }
+                await fetchDocs();
             }
         },
     });

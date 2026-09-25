@@ -412,7 +412,7 @@ _ACKNOWLEDGMENT_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-def classify_smalltalk(question: str) -> Optional[str]:
+def classify_smalltalk(question: str) -> str | None:
     """
     Detects short messages that shouldn't go through retrieval at all.
     Returns 'greeting', 'acknowledgment', or None (meaning: run retrieval
@@ -494,9 +494,9 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
         )
         rewritten = (completion.choices[0].message.content or "").strip().strip('"')
         return rewritten if rewritten else question
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — any rewrite failure should fall back to the raw question
         print(f"[DEBUG] Query rewrite failed, using raw question instead: {e}")
-        return question
+    return question
 
 
 _ENUMERATION_PATTERNS = re.compile(

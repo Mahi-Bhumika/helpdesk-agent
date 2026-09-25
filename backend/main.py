@@ -383,26 +383,106 @@ def classify_smalltalk(question: str) -> Optional[str]:
     return None
 
 
-_FOLLOWUP_PATTERNS = re.compile(
-    r"^\s*(what\s?else|tell\s?me\s?more|more\s?info(rmation)?|and\s?(then|more)?|why|"
-    r"go\s?on|continue|anything\s?else|what\s?about\s?(that|it|those)?|explain\s?more|"
-    r"elaborate|more\s?details?|keep\s?going)\s*[!.?]*\s*$",
+SHORT_QUESTION_CHAR_LIMIT = 40
+
+def _needs_query_rewrite(question: str, history_rows: list) -> bool:
+    """
+    Decides whether the retrieval query needs rewriting before embedding.
+
+    Deliberately NOT keyword-based. A fixed phrase list ("tell me more",
+    "what else") will always miss real phrasings people actually type —
+    "how much?", "the price?", "yes please" are all genuine follow-ups
+    that depend entirely on the previous turn, and none of them match any
+    reasonable keyword list. Triggering on message SHAPE (short + a real
+    conversation already exists) instead of specific words covers all of
+    these, and anything else worded just as briefly, without needing to
+    predict the exact wording in advance.
+
+    A short but genuinely standalone new question ("refund policy?") will
+    also trigger this — that's an accepted, safe tradeoff: the rewrite
+    prompt below is explicitly instructed to leave already-standalone
+    questions unchanged, so the cost is one extra fast LLM call, not a
+    wrong answer.
+    """
+    if not history_rows:
+        return False
+    return len(question.strip()) <= SHORT_QUESTION_CHAR_LIMIT
+
+
+def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
+    """
+    Uses one fast Groq call to turn a short, context-dependent question
+    into a standalone search query, using the recent conversation for
+    context — e.g. "how much?" after a message about the Summit 400
+    becomes "What is the price of the Summit 400 headphones?" before
+    being embedded for pgvector search.
+
+    This ONLY affects what gets embedded and searched. The LLM that
+    generates the actual user-facing answer still sees the real, original
+    question text — this step exists purely to fix retrieval, not to
+    change what the bot appears to have been asked.
+
+    Falls back to the raw question on any failure (network hiccup, rate
+    limit, malformed response) rather than letting a non-critical
+    enhancement step turn into a new source of /chat errors.
+    """
+    history_text = "\n".join(f"{h.sender}: {h.content}" for h in history_rows)
+    rewrite_prompt = (
+        "Rewrite the user's latest message into a short, standalone search "
+        "query, using the conversation history to fill in anything it "
+        "depends on (a product name, a topic, what 'it' or 'that' refers "
+        "to). Output ONLY the rewritten query — no quotes, no explanation. "
+        "If the message is already standalone and doesn't depend on the "
+        "history, output it unchanged.\n\n"
+        f"Conversation history:\n{history_text}\n\n"
+        f"Latest message: {question}\n\n"
+        "Standalone search query:"
+    )
+    try:
+        completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": rewrite_prompt}],
+            max_tokens=60,
+            temperature=0,
+        )
+        rewritten = (completion.choices[0].message.content or "").strip().strip('"')
+        return rewritten if rewritten else question
+    except Exception as e:
+        print(f"[DEBUG] Query rewrite failed, using raw question instead: {e}")
+        return question
+
+
+_ENUMERATION_PATTERNS = re.compile(
+    r"(full\s?list|list\s?(of\s?)?(all|every)|everything\s?(you|there\s?is)|"
+    r"all\s?(of\s?)?(your|the)?\s?(products?|items?|services?|plans?|options?|features?)|"
+    r"complete\s?list|show\s?me\s?(all|everything)|"
+    r"what\s?(products?|items?|services?|plans?)\s?do\s?you\s?(have|offer|sell|provide)|"
+    r"everything\s?(you\s?)?(have|offer|sell))",
     re.IGNORECASE,
 )
 
-def is_followup(question: str) -> bool:
+def is_enumeration_query(question: str) -> bool:
     """
-    Detects short, context-dependent follow-ups ("what else", "tell me
-    more", "why") that carry almost no standalone semantic content — if
-    embedded and searched as-is, they score below the similarity
-    threshold against every real chunk and force a false fallback, even
-    though the LLM would have understood the question fine given the
-    conversation history it already receives.
+    Detects broad "give me everything" style questions ("full list of all
+    products", "what services do you offer"). Deliberately NOT
+    length-capped — these can be phrased naturally at any length ("gimme
+    a full list of all products" is well over the 40-char rewrite
+    threshold above). Uses search() rather than match() since the
+    trigger phrase can appear anywhere in the sentence, not just at the
+    start.
+
+    Vector similarity search is structurally the wrong tool for this
+    shape of question: it finds the single most semantically similar
+    chunk(s) to the literal query text, but an exhaustive answer usually
+    needs many chunks that are each only weakly similar to the phrase
+    "full list of all products" on their own (a chunk about one specific
+    item rarely scores high against that exact wording). The normal
+    top_k=5 + 0.35-threshold search is tuned for precision on a single
+    fact, not coverage across a whole catalog — so it needs a separate,
+    much wider retrieval pass rather than a parameter tweak to the
+    existing one.
     """
-    q = question.strip()
-    if len(q) > 30:
-        return False
-    return bool(_FOLLOWUP_PATTERNS.match(q))
+    return bool(_ENUMERATION_PATTERNS.search(question))
 
 
 
@@ -425,6 +505,14 @@ class ChatResponse(BaseModel):
 # Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
 # this (1 - cosine_distance) are treated as not relevant enough to answer from.
 SIMILARITY_THRESHOLD = 0.35
+
+# Separate, looser settings for detected "list everything" queries — the goal
+# there is coverage, not precision, so cast a much wider net: more chunks,
+# and a much lower bar for "relevant enough to include." Still bounded, not
+# unlimited — 25 chunks is generous for this project's real chunk counts
+# (a few dozen per document) without risking an oversized LLM prompt.
+ENUMERATION_TOP_K = 25
+ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -503,24 +591,29 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # Step 4: Query vector store using Cosine Distance operator (<=>)
     #
-    # For a genuine follow-up ("tell me more", "why") the raw text alone
-    # has almost no semantic content to embed — it scores below the
-    # similarity threshold against every real chunk regardless of how
-    # relevant the actual topic is, forcing a false fallback. Augment
-    # ONLY the retrieval query (never what's shown to the LLM below) with
-    # the most recent real user question and bot answer, so the vector
-    # search has something concrete to match against. Ordinary, specific
-    # questions are left untouched — blending in prior context there
-    # would risk dragging in irrelevant chunks from an earlier topic.
+    # A short, context-dependent question ("how much?", "the price?",
+    # "yes please") has almost no standalone semantic content — embedded
+    # and searched as-is, it scores below the similarity threshold against
+    # every real chunk regardless of how relevant the actual topic is,
+    # forcing a false fallback. Rewriting it into a standalone query
+    # before embedding (see _rewrite_query_for_retrieval) fixes this
+    # generally, without needing to predict the exact wording in advance.
+    #
+    # An enumeration query ("full list of all products") is a different
+    # failure mode entirely — it doesn't need rewriting, it needs a wider
+    # net, so it gets its own top_k/threshold instead. The two are
+    # mutually exclusive by construction (a broad "list everything"
+    # question isn't also a short "tell me more"-shaped one).
+    is_enum = is_enumeration_query(query.question)
+
     retrieval_query_text = query.question
-    if is_followup(query.question) and history_rows:
-        last_user = next((h.content for h in reversed(history_rows) if h.sender == "user"), None)
-        last_bot = next((h.content for h in reversed(history_rows) if h.sender == "bot"), None)
-        context_bits = [bit for bit in (last_user, last_bot) if bit]
-        if context_bits:
-            retrieval_query_text = " ".join(context_bits) + " " + query.question
+    if not is_enum and _needs_query_rewrite(query.question, history_rows):
+        retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
 
     query_embedding = embed_chunks([retrieval_query_text])[0]
+
+    effective_top_k = ENUMERATION_TOP_K if is_enum else top_k
+    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if is_enum else SIMILARITY_THRESHOLD
 
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
@@ -532,14 +625,14 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     result = await db.execute(search_query, {
         "query_embedding": str(query_embedding),
         "tenant_id": query.tenant_id,
-        "top_k": top_k,
+        "top_k": effective_top_k,
     })
     rows = result.fetchall()
 
     # Step 5: Filter chunks using the similarity threshold
     retrieved_chunks = [
         dict(row._mapping) for row in rows
-        if (1 - row.distance) >= SIMILARITY_THRESHOLD
+        if (1 - row.distance) >= effective_threshold
     ]
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
@@ -548,7 +641,12 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     # Step 6: Construct LLM messages with conversation memory
     system_prompt = (
         f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business. "
-        "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
+        "Use plain conversational language without headers, defaulting to 2-4 short sentences. Two exceptions: "
+        "(1) if the question genuinely asks for a step-by-step process, a short numbered list is fine; "
+        "(2) if the question asks for a list, catalog, or everything available (e.g. 'list all your "
+        "products', 'what do you offer'), use all of the Retrieved Context provided to compile as complete "
+        "a bullet-point list as the context actually supports — don't artificially shorten it to 2-4 "
+        "sentences, and don't invent items the context doesn't mention.\n\n"
         "STRICT RULE — read carefully: You may ONLY answer using information found in the 'Retrieved Context' "
         "provided below. This applies to every kind of question, with no exceptions — factual questions, casual "
         "questions, personal questions, opinion questions, anything. You have no knowledge, opinions, preferences, "
@@ -570,8 +668,10 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     llm_messages.append({"role": "user", "content": user_prompt})
 
     print(f"[DEBUG] Question: {query.question}")
+    if is_enum:
+        print(f"[DEBUG] Enumeration query detected — top_k={effective_top_k}, threshold={effective_threshold}")
     if retrieval_query_text != query.question:
-        print(f"[DEBUG] Retrieval query (follow-up augmented): {retrieval_query_text}")
+        print(f"[DEBUG] Retrieval query (rewritten from '{query.question}'): {retrieval_query_text}")
     print(f"[DEBUG] Context sent to LLM:\n{context}")
 
     completion = groq_client.chat.completions.create(
@@ -954,3 +1054,7 @@ async def get_session_messages(
         m["sources"] = sources_by_message.get(str(m["message_id"]), [])
 
     return messages
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

@@ -28,6 +28,7 @@ from auth import get_current_user, decode_jwt
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
 
 import re
+import difflib
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
@@ -389,13 +390,48 @@ _FOLLOWUP_TRIGGERS = [
     "what else", "and?", "and", "anything else", "more", "others"
 ]
 
+# --- Typo-tolerant smalltalk word lists (fuzzy fallback below) ---
+_GREETING_WORDS = [
+    "hi", "hii", "hiii", "hey", "heyy", "heya", "hello", "helloo",
+    "howdy", "hola", "yo", "yoo", "sup", "gm", "gmorning",
+]
+_GREETING_PHRASES = ["good morning", "good afternoon", "good evening"]
+_ACK_WORDS = [
+    "thanks", "thankyou", "thank you", "thx", "ty", "tysm", "ok", "okay",
+    "okie", "got it", "cool", "great", "perfect", "alright", "sounds good",
+    "awesome", "nice", "sure", "no problem", "np",
+]
+_IDENTITY_PHRASES = [
+    "who are you", "what are you", "are you a bot", "how are you",
+    "what is your name",
+]
+
 
 # --- Classification & Intent Helpers ---
+
+def _fuzzy_match(token: str, candidates: list[str], cutoff: float = 0.72) -> bool:
+    """
+    True if `token` is an exact or close (typo-tolerant) match to any
+    candidate phrase, using edit-distance-style similarity rather than a
+    fixed regex, so misspellings like 'heoll' or 'gmm' still resolve to
+    their intended word.
+    """
+    if not token:
+        return False
+    if token in candidates:
+        return True
+    return bool(difflib.get_close_matches(token, candidates, n=1, cutoff=cutoff))
+
 
 def classify_smalltalk(question: str, has_history: bool = False) -> Optional[tuple[str, str]]:
     """
     Classifies standalone smalltalk (greetings, acknowledgments, identity questions).
     Bypasses smalltalk if the message contains > 5 words to prevent capturing contextual queries.
+
+    Runs the exact regexes first (cheap, precise), then — only for very short
+    inputs (<=3 words), to avoid misclassifying real questions — falls back to
+    fuzzy/typo-tolerant matching against known phrase lists. This is what
+    catches variants the regex can't enumerate, like 'heoll', 'gmm', or 'tanx'.
     """
     raw_cleaned = question.strip()
     word_count = len(raw_cleaned.split())
@@ -411,6 +447,23 @@ def classify_smalltalk(question: str, has_history: bool = False) -> Optional[tup
 
     if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned):
         return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
+
+    if word_count <= 3:
+        normalized = re.sub(r"[^a-z\s]", "", raw_cleaned.lower()).strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        first_word = normalized.split()[0] if normalized else ""
+
+        if not normalized:
+            return None
+
+        if _fuzzy_match(normalized, _IDENTITY_PHRASES, cutoff=0.8):
+            return ("identity", "I am an AI support assistant here to help answer your questions based on our knowledge base.")
+
+        if _fuzzy_match(first_word, _GREETING_WORDS, cutoff=0.72) or _fuzzy_match(normalized, _GREETING_PHRASES, cutoff=0.72):
+            return ("greeting", "greeting_placeholder")
+
+        if _fuzzy_match(normalized, _ACK_WORDS, cutoff=0.75) or _fuzzy_match(first_word, _ACK_WORDS, cutoff=0.75):
+            return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
 
     return None
 
@@ -454,7 +507,10 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
             "content": (
                 "You are a search query reformulation module. Given a conversation history and a follow-up user message, "
                 "rephrase the follow-up message into a complete, standalone search query containing all necessary entity "
-                "names, products, and specifics from history. Output ONLY the rephrased search query, nothing else."
+                "names, products, and specifics from history. Preserve the user's original intent — if they are asking "
+                "for a list, a summary/overview, or a price, keep that instruction explicit in the rewritten query "
+                "(e.g. 'pricing for the Pro plan', 'summary of the Starter plan features'). "
+                "Output ONLY the rephrased search query, nothing else."
             ),
         },
         {
@@ -504,6 +560,12 @@ SIMILARITY_THRESHOLD = 0.35
 # (a few dozen per document) without risking an oversized LLM prompt.
 ENUMERATION_TOP_K = 25
 ENUMERATION_SIMILARITY_THRESHOLD = 0.15
+
+# How far below SIMILARITY_THRESHOLD a single best match is still allowed to
+# fall before we give up entirely on an ordinary (non-enum/summary) query.
+# This exists purely to stop the hard 0.35 cliff from turning a genuinely
+# relevant top hit (e.g. 0.30 similarity) into a false "no context" fallback.
+RELAXED_RETRY_FLOOR = 0.20
  
 
 # --- Primary Endpoint ---
@@ -585,7 +647,15 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     
     retrieval_query_text = query.question
 
-    if not (is_enum or is_summary) and _needs_query_rewrite(query.question, history_rows):
+    # Rewrite runs for ANY short/contextual follow-up, including enumeration
+    # and summary requests — is_enum/is_summary are already computed above
+    # from the ORIGINAL question, so effective_top_k / effective_threshold
+    # below are unaffected either way. Previously this was skipped for
+    # is_enum/is_summary, which meant a follow-up like "summarize that" or
+    # "list pricing for it" never had its pronoun resolved before embedding,
+    # so it had nothing meaningful to match against and fell through to the
+    # fallback message.
+    if _needs_query_rewrite(query.question, history_rows):
         retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
         print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
 
@@ -615,6 +685,18 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         dict(row._mapping) for row in rows
         if (1 - row.distance) >= effective_threshold
     ]
+
+    # Safety-net retry: a hard similarity cliff can wrongly discard a
+    # genuinely relevant single best match (e.g. 0.30 vs a 0.35 bar) for an
+    # ordinary question, producing a false fallback even though the answer
+    # is right there. If nothing cleared the bar, accept the single best
+    # match as long as it's still reasonably close (>= RELAXED_RETRY_FLOOR).
+    # Enumeration/summary queries already use a wide net, so they're excluded.
+    if not retrieved_chunks and rows and not (is_enum or is_summary):
+        best = rows[0]
+        if (1 - best.distance) >= RELAXED_RETRY_FLOOR:
+            retrieved_chunks = [dict(best._mapping)]
+            print(f"[DEBUG] Relaxed-threshold retry accepted best match at similarity {1 - best.distance:.3f}")
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."

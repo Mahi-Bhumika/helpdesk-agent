@@ -2,6 +2,13 @@ name: Backend CI
 
 on:
   pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend.yml'
+  push:
+    branches:
+      - add-frontend-ci
     paths:
       - 'backend/**'
       - '.github/workflows/backend.yml'
@@ -18,7 +25,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.14.7'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
 

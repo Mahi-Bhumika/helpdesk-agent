@@ -485,43 +485,110 @@ def is_enumeration_query(question: str) -> bool:
     return bool(_ENUMERATION_PATTERNS.search(question))
 
 
-
-class ChatQuery(BaseModel):
-    tenant_id: str
-    session_id: Optional[str] = None
-    question: str
-    top_k: int = 5
-
-
 class ChatSource(BaseModel):
     chunk_id: str
     relevance_score: float
 
+class ChatQuery(BaseModel):
+    tenant_id: str
+    question: str
+    session_id: Optional[str] = None
+    top_k: int = 5
+
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
-    sources: list[ChatSource]
+    sources: List[ChatSource]
 
-# Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
-# this (1 - cosine_distance) are treated as not relevant enough to answer from.
 SIMILARITY_THRESHOLD = 0.35
-
-# Separate, looser settings for detected "list everything" queries — the goal
-# there is coverage, not precision, so cast a much wider net: more chunks,
-# and a much lower bar for "relevant enough to include." Still bounded, not
-# unlimited — 25 chunks is generous for this project's real chunk counts
-# (a few dozen per document) without risking an oversized LLM prompt.
 ENUMERATION_TOP_K = 25
 ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
 
+# --- Helper Functions ---
+
+def classify_smalltalk(question: str) -> Optional[str]:
+    """
+    Classifies strict standalone smalltalk.
+    If the question contains follow-up intents (e.g. 'cool how much?'),
+    it returns None so it can be handled by the RAG pipeline.
+    """
+    cleaned = question.strip().lower().rstrip("!.,?")
+    greetings = {"hi", "hello", "hey", "good morning", "good evening"}
+    acknowledgments = {"thanks", "thank you", "cool", "ok", "okay", "got it"}
+
+    if cleaned in greetings:
+        return "greeting"
+    if cleaned in acknowledgments:
+        return "acknowledgment"
+    return None
+
+
+def _needs_query_rewrite(question: str, history_rows: list) -> bool:
+    """
+    Determines if the question depends on conversation history to make sense.
+    """
+    if not history_rows:
+        return False
+
+    q_lower = question.strip().lower()
+    followup_triggers = [
+        "tell me more", "more details", "how much", "price", "cost",
+        "and the other", "what about", "the other one", "both", "this",
+        "that", "these", "it", "how much is it", "cool how much"
+    ]
+
+    if any(trigger in q_lower for trigger in followup_triggers):
+        return True
+
+    return len(q_lower.split()) <= 5
+
+
+def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
+    """
+    Uses an LLM turn to resolve pronouns and implicit references into a
+    standalone vector search query.
+    """
+    history_str = "\n".join([
+        f"{'User' if h.sender == 'user' else 'Assistant'}: {h.content}"
+        for h in history_rows[-4:]
+    ])
+
+    rewrite_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are a search query reformulation module. Given a conversation history and a follow-up user message, "
+                "rephrase the follow-up message into a complete, standalone search query containing all necessary product "
+                "names and specifics from history. Output ONLY the rephrased search query, nothing else."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Conversation History:\n{history_str}\n\nFollow-up User Message: {question}\n\nStandalone Search Query:",
+        },
+    ]
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=rewrite_prompt,
+            temperature=0.0,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[DEBUG] Query rewrite failed: {e}")
+        return question
+
+
+# --- Primary Endpoint ---
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
     enforce_chat_rate_limit(query.tenant_id)
+    top_k = min(query.top_k, 10)
 
-    top_k = min(query.top_k, 10)  # cap to prevent an oversized retrieval query
-
-    # Fetch tenant config with required fields
+    # 1. Fetch Tenant Configuration
     tenant_row = await db.execute(
         text("SELECT website_domain, fallback_message, bot_name, greeting_message FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"),
         {"tid": query.tenant_id},
@@ -532,7 +599,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     if not origin or extract_origin(tenant.website_domain) != origin:
         raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
 
-    # Step 1: Ensure session exists or create a new one
+    # 2. Session Initialization / Verification
     session_id = query.session_id
     if session_id:
         existing_session = await db.execute(
@@ -553,29 +620,27 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Smalltalk check
+    # 3. Smalltalk Check
     smalltalk_kind = classify_smalltalk(query.question)
     if smalltalk_kind:
-        if smalltalk_kind == "greeting":
-            reply = tenant.greeting_message or "Hello! How can I help you today?"
-        else:  # "acknowledgment"
-            reply = "You're welcome! Let me know if there's anything else I can help with."
+        reply = (
+            tenant.greeting_message or "Hello! How can I help you today?"
+            if smalltalk_kind == "greeting"
+            else "You're welcome! Let me know if there's anything else I can help with."
+        )
 
-        # Insert user message first
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
         )
-        # Insert bot reply
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
         )
         await db.commit()
-
         return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
-    # Step 3: Fetch last 6 messages from conversation history for memory
+    # 4. Fetch Conversation History (Last 6 Turns)
     history_result = await db.execute(
         text("""
             SELECT sender, content 
@@ -588,34 +653,19 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     history_rows = list(reversed(history_result.fetchall()))
 
-    # Step 4: Query vector store using Cosine Distance operator (<=>)
-    #
-    # A short, context-dependent question ("how much?", "the price?",
-    # "yes please") has almost no standalone semantic content — embedded
-    # and searched as-is, it scores below the similarity threshold against
-    # every real chunk regardless of how relevant the actual topic is,
-    # forcing a false fallback. Rewriting it into a standalone query
-    # before embedding (see _rewrite_query_for_retrieval) fixes this
-    # generally, without needing to predict the exact wording in advance.
-    #
-    # An enumeration query ("full list of all products") is a different
-    # failure mode entirely — it doesn't need rewriting, it needs a wider
-    # net, so it gets its own top_k/threshold instead. The two are
-    # mutually exclusive by construction (a broad "list everything"
-    # question isn't also a short "tell me more"-shaped one).
+    # 5. Query Rewriting & Embedding Strategy
     is_enum = is_enumeration_query(query.question)
-
     retrieval_query_text = query.question
-    if retrieval_query_text != query.question:
-        print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
+
     if not is_enum and _needs_query_rewrite(query.question, history_rows):
         retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
+        print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
 
     query_embedding = embed_chunks([retrieval_query_text])[0]
-
     effective_top_k = ENUMERATION_TOP_K if is_enum else top_k
     effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if is_enum else SIMILARITY_THRESHOLD
 
+    # 6. Vector Search Execution
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
         FROM document_chunks
@@ -630,7 +680,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     })
     rows = result.fetchall()
 
-    # Step 5: Filter chunks using the similarity threshold
+    # 7. Threshold Filtering
     retrieved_chunks = [
         dict(row._mapping) for row in rows
         if (1 - row.distance) >= effective_threshold
@@ -639,7 +689,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
-    # Step 6: Construct LLM messages with conversation memory
+    # 8. Construct System & User Prompts
     system_prompt = (
         f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business. "
         "Use plain conversational language without headers, defaulting to 2-4 short sentences. Two exceptions: "
@@ -668,21 +718,14 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
     llm_messages.append({"role": "user", "content": user_prompt})
 
-    print(f"[DEBUG] Question: {query.question}")
-    if is_enum:
-        print(f"[DEBUG] Enumeration query detected — top_k={effective_top_k}, threshold={effective_threshold}")
-    if retrieval_query_text != query.question:
-        print(f"[DEBUG] Retrieval query (rewritten from '{query.question}'): {retrieval_query_text}")
-    print(f"[DEBUG] Context sent to LLM:\n{context}")
-
+    # 9. LLM Generation
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=llm_messages,
     )
-
     answer = completion.choices[0].message.content
 
-    # Step 7: Save current turn to DB
+    # 10. Save Current Turn to DB
     await db.execute(
         text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
@@ -694,7 +737,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # Step 8: Save source references — batched in one call instead of one per chunk
+    # 11. Store Sources & Commit
     sources = []
     if retrieved_chunks:
         source_rows = [
@@ -720,7 +763,6 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     await db.commit()
 
     return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
-
 
 class EndChatRequest(BaseModel):
     session_id: str

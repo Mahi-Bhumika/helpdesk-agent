@@ -6,6 +6,7 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend.yml"
+      
   # Allows testing directly on your branch when pushing:
   push:
     branches:

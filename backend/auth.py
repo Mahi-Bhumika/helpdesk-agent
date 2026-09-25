@@ -1,9 +1,11 @@
 import os
+
 import jwt
+from fastapi import Depends, Header, HTTPException
 from jwt import PyJWKClient
-from fastapi import Header, HTTPException, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from database import get_db
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")  # e.g. https://oqtuxlpygpydojjwxyli.supabase.co

@@ -1,7 +1,7 @@
-"use client"
+"use client";
 
 import { useDropzone } from "react-dropzone";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
@@ -56,6 +56,7 @@ export default function DocumentsPage() {
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
@@ -70,6 +71,7 @@ export default function DocumentsPage() {
         setLoadingDocs(false);
     }, [tenantId]);
 
+    // Initial fetch on mount with loading indicator
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
         fetchDocs();
@@ -117,6 +119,9 @@ export default function DocumentsPage() {
                 const created = await createRes.json();
                 const documentId = created.document_id;
 
+                await fetchDocs();
+                pollRef.current = setInterval(fetchDocs, STATUS_POLL_INTERVAL_MS);
+
                 const formData = new FormData();
                 formData.append("document_id", documentId);
                 formData.append("tenant_id", tenantId);
@@ -133,7 +138,7 @@ export default function DocumentsPage() {
                             const errBody = await uploadRes.json();
                             message = errBody.detail ?? errBody.message ?? message;
                         } catch {
-                            // response wasn't JSON — fall back to the generic message
+                            // response wasn't JSON — fall back to default
                         }
                     }
                     throw new Error(message);
@@ -145,6 +150,12 @@ export default function DocumentsPage() {
             } catch (err) {
                 setStatus("error");
                 setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+            } finally {
+                if (pollRef.current) {
+                    clearInterval(pollRef.current);
+                    pollRef.current = null;
+                }
+                await fetchDocs();
             }
         },
     });
@@ -252,6 +263,21 @@ export default function DocumentsPage() {
                                             <td className="px-6 py-4"><StatusPill status={doc.status} /></td>
                                             <td className="px-6 py-4 text-sm text-text-secondary">
                                                 {new Date(doc.created_at).toLocaleString()}
+                                            </td>
+                                            <td className="px-6 py-4 text-right">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleDelete(doc.document_id, doc.file_url)}
+                                                    disabled={deletingId === doc.document_id}
+                                                    aria-label={`Delete ${doc.file_url ?? "document"}`}
+                                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-text-muted hover:text-status-declined hover:bg-status-declinedSoft transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    {deletingId === doc.document_id ? (
+                                                        <span className="text-xs">…</span>
+                                                    ) : (
+                                                        <X className="h-4 w-4" />
+                                                    )}
+                                                </button>
                                             </td>
                                             <td className="px-6 py-4 text-right">
                                                 <button

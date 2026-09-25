@@ -57,7 +57,7 @@ export default function AnalyticsPage() {
     }, [tenantId]);
 
     if (loading) return <p className="text-sm text-text-secondary">Loading analytics...</p>;
-    if (!stats) return <p className="text-sm text-status-declined">Couldn't load analytics.</p>;
+    if (!stats) return <p className="text-sm text-status-declined">Couldn&apos;t load analytics.</p>;
 
     return (
         <div className="p-8">

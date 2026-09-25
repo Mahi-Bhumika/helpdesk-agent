@@ -249,7 +249,7 @@ export default function SettingsPage() {
                         </div>
                     </div>
                     <p className="text-xs text-text-muted mt-3 text-center">
-                        {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}'s greeting, shown as visitors will see it
+                        {(isEditing ? draft.bot_name : saved.bot_name) || "Your bot"}&apos;s greeting, shown as visitors will see it
                     </p>
                 </GlassCard>
             </div>

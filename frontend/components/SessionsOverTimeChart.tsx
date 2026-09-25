@@ -55,7 +55,7 @@ export default function SessionsOverTimeChart({
         <div className="h-56 flex flex-col items-center justify-center text-center gap-1">
           <p className="text-sm text-text-secondary">No sessions yet in this window.</p>
           <p className="text-xs text-text-muted">
-            Once your widget starts getting real conversations, they'll show up here.
+            Once your widget starts getting real conversations, they&apos;ll show up here.
           </p>
         </div>
       )}

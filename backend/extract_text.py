@@ -21,7 +21,7 @@ def _try_pypdf2_page(reader: "PdfReader", page_index: int) -> str | None:
     try:
         page_text = reader.pages[page_index].extract_text()
         return page_text if page_text else None
-    except Exception:
+    except Exception: # noqa: BLE001
         return None
 
 
@@ -45,7 +45,7 @@ def extract_text(pdf_path: str) -> str:
     if _PYPDF2_AVAILABLE:
         try:
             pypdf2_reader = PdfReader(pdf_path)
-        except Exception:
+        except Exception: # noqa: BLE001
             pypdf2_reader = None  # fallback simply unavailable for this file; not fatal
 
     full_text = []

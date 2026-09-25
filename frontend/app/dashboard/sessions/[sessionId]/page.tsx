@@ -99,7 +99,7 @@ export default function SessionTranscriptPage() {
             {loading ? (
                 <p className="text-sm text-text-secondary">Loading transcript...</p>
             ) : forbidden ? (
-                <p className="text-sm text-red-400">You don't have access to this session — it may belong to a different tenant.</p>
+                <p className="text-sm text-red-400">You don&apos;t have access to this session — it may belong to a different tenant.</p>
             ) : error ? (
                 <p className="text-sm text-red-400">{error}</p>
             ) : messages.length === 0 ? (

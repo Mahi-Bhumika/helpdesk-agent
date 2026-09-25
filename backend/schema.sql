@@ -1,4 +1,6 @@
 create extension if not exists vector;
+create extension if not exists pgcrypto;
+
 
 -- TENANTS
 create table tenants (

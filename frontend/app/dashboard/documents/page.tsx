@@ -1,7 +1,8 @@
 "use client"
 
 import { useDropzone } from "react-dropzone";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import { authedFetch } from "@/lib/api";
@@ -47,8 +48,6 @@ function StatusPill({ status }: { status: string }) {
     );
 }
 
-const STATUS_POLL_INTERVAL_MS = 1500;
-
 export default function DocumentsPage() {
     const { tenantId } = useAuth();
     const [theme, setTheme] = useState("");
@@ -56,10 +55,11 @@ export default function DocumentsPage() {
     const [docs, setDocs] = useState<Doc[]>([]);
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const [deletingId, setDeletingId] = useState<string | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
+        setLoadingDocs(true);
         const { data, error } = await supabase
             .from("documents")
             .select("document_id, file_url, format, theme, status, created_at")
@@ -67,22 +67,31 @@ export default function DocumentsPage() {
             .order("created_at", { ascending: false });
 
         if (!error && data) setDocs(data as Doc[]);
+        setLoadingDocs(false);
     }, [tenantId]);
 
     useEffect(() => {
-        (async () => {
-            setLoadingDocs(true);
-            await fetchDocs();
-            setLoadingDocs(false);
-        })();
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
+        fetchDocs();
     }, [fetchDocs]);
 
-    // Stop any in-flight poll if the component unmounts mid-upload.
-    useEffect(() => {
-        return () => {
-            if (pollRef.current) clearInterval(pollRef.current);
-        };
-    }, []);
+    const handleDelete = async (documentId: string, filename: string | null) => {
+        const label = filename ?? "this document";
+        if (!window.confirm(`Delete "${label}"? This can't be undone.`)) return;
+
+        setDeletingId(documentId);
+        setErrorMessage(null);
+        try {
+            const res = await authedFetch(`/documents/${documentId}`, { method: "DELETE" });
+            if (!res.ok) throw new Error(`Failed to delete document (${res.status})`);
+            // Optimistic removal — don't wait on a full refetch for a doc we know is gone
+            setDocs((prev) => prev.filter((d) => d.document_id !== documentId));
+        } catch (err) {
+            setErrorMessage(err instanceof Error ? err.message : "Failed to delete document.");
+        } finally {
+            setDeletingId(null);
+        }
+    };
 
     const { getRootProps, getInputProps, isDragActive } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
@@ -108,13 +117,6 @@ export default function DocumentsPage() {
                 const created = await createRes.json();
                 const documentId = created.document_id;
 
-                // Show the new row right away (status: 'uploaded'), then poll
-                // while the pipeline runs so 'processing' is actually visible
-                // instead of being invisibly skipped between one fetch before
-                // the upload and one fetch after it.
-                await fetchDocs();
-                pollRef.current = setInterval(fetchDocs, STATUS_POLL_INTERVAL_MS);
-
                 const formData = new FormData();
                 formData.append("document_id", documentId);
                 formData.append("tenant_id", tenantId);
@@ -139,19 +141,10 @@ export default function DocumentsPage() {
 
                 setStatus("success");
                 setTheme("");
+                await fetchDocs();
             } catch (err) {
                 setStatus("error");
                 setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
-            } finally {
-                // Always stop polling and do one guaranteed final fetch, on
-                // both success and failure — previously a failed upload never
-                // refetched at all, so a 'failed' row silently didn't appear
-                // until the next manual page reload.
-                if (pollRef.current) {
-                    clearInterval(pollRef.current);
-                    pollRef.current = null;
-                }
-                await fetchDocs();
             }
         },
     });
@@ -248,6 +241,7 @@ export default function DocumentsPage() {
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Category</th>
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Status</th>
                                         <th className="px-6 py-4 text-xs font-medium text-text-secondary">Uploaded</th>
+                                        <th className="px-6 py-4 text-xs font-medium text-text-secondary text-right">Remove</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -258,6 +252,21 @@ export default function DocumentsPage() {
                                             <td className="px-6 py-4"><StatusPill status={doc.status} /></td>
                                             <td className="px-6 py-4 text-sm text-text-secondary">
                                                 {new Date(doc.created_at).toLocaleString()}
+                                            </td>
+                                            <td className="px-6 py-4 text-right">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleDelete(doc.document_id, doc.file_url)}
+                                                    disabled={deletingId === doc.document_id}
+                                                    aria-label={`Delete ${doc.file_url ?? "document"}`}
+                                                    className="inline-flex h-7 w-7 items-center justify-center rounded-full text-text-muted hover:text-status-declined hover:bg-status-declinedSoft transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    {deletingId === doc.document_id ? (
+                                                        <span className="text-xs">…</span>
+                                                    ) : (
+                                                        <X className="h-4 w-4" />
+                                                    )}
+                                                </button>
                                             </td>
                                         </tr>
                                     ))}

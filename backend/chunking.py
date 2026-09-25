@@ -1,8 +1,7 @@
 import numpy as np
 import onnxruntime as ort
-from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
-
+from transformers import AutoTokenizer
 
 MODEL_ID = "Xenova/all-MiniLM-L6-v2"  # pre-converted ONNX version of the same model
 

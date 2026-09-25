@@ -1,34 +1,34 @@
-"use client"
+"use client";
 
 import { useAuth } from "@/lib/auth-context";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 import Sidebar from "@/components/sidebar"
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
     const { session, loading, role, status } = useAuth();
     const router = useRouter();
-    const [statusChecked, setStatusChecked] = useState(false);
 
-useEffect(() => {
-    if (loading) return;
-    if (!session) {
-        router.push("/login");
-        return;
-    }
-    if (status === "declined") {
-        router.push("/declined");
-        return;
-    }
-    if (status !== "active") {
-        router.push("/pending");
-        return;
-    }
-    setStatusChecked(true);
-}, [loading, session, status, router]);
+    useEffect(() => {
+        if (loading) return;
+        if (!session) {
+            router.push("/login");
+            return;
+        }
+        if (status === "declined") {
+            router.push("/declined");
+            return;
+        }
+        if (status !== "active") {
+            router.push("/pending");
+            return;
+        }
+    }, [loading, session, status, router]);
 
-    if (loading || !statusChecked) {
+    const isReady = !loading && !!session && status === "active";
+
+    if (loading || !isReady) {
         return <div className="flex min-h-screen items-center justify-center">Loading...</div>
     }
     if (!session) {

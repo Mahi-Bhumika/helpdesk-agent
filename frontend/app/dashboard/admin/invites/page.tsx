@@ -85,8 +85,9 @@ export default function InvitesAdminPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
     fetchPending();
-  }, [fetchPending]);
+}, [fetchPending]);
 
   const handleDecision = async (userId: string, action: "approve" | "decline") => {
     setActioningId(userId);
@@ -170,7 +171,7 @@ export default function InvitesAdminPage() {
                   <td className="px-6 py-4 text-sm text-text-secondary">
                     {new Date(u.invited_at ?? u.created_at).toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 flex items-center gap-2">
+                <td className="px-6 py-4 flex items-center gap-2">
                     <div className="flex items-center gap-2">
                         {/* Accept Button - Primary Purple */}
                         <button

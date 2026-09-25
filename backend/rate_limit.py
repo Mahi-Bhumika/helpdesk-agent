@@ -37,7 +37,6 @@ control. RLS is still what actually protects tenant data.
 
 import time
 from collections import defaultdict, deque
-from typing import Optional
 
 from fastapi import HTTPException
 
@@ -52,7 +51,7 @@ def enforce_chat_rate_limit(
     tenant_id: str,
     max_requests: int = DEFAULT_MAX_REQUESTS,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
-    _now: Optional[float] = None,
+    _now: float | None = None,
 ) -> None:
     """Call this at the TOP of the /chat route, right after parsing
     the request body (so tenant_id is available), and BEFORE doing

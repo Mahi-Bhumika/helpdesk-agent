@@ -1,12 +1,15 @@
-"use client"
+"use client";
 
 import { useDropzone } from "react-dropzone";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
 import { authedFetch } from "@/lib/api";
 import GlassCard from "@/components/GlassCard";
+
+// Declare poll interval constant (e.g., 3 seconds)
+const STATUS_POLL_INTERVAL_MS = 3000;
 
 type Doc = {
     document_id: string;
@@ -56,10 +59,13 @@ export default function DocumentsPage() {
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    const fetchDocs = useCallback(async () => {
+    // Modified fetchDocs to support silent background refreshes without showing skeleton loaders
+    const fetchDocs = useCallback(async (isBackgroundFetch = false) => {
         if (!tenantId) return;
-        setLoadingDocs(true);
+        if (!isBackgroundFetch) setLoadingDocs(true);
+
         const { data, error } = await supabase
             .from("documents")
             .select("document_id, file_url, format, theme, status, created_at")
@@ -67,13 +73,20 @@ export default function DocumentsPage() {
             .order("created_at", { ascending: false });
 
         if (!error && data) setDocs(data as Doc[]);
-        setLoadingDocs(false);
+        if (!isBackgroundFetch) setLoadingDocs(false);
     }, [tenantId]);
 
+    // Fetch initial document list on mount
     useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
         fetchDocs();
     }, [fetchDocs]);
+
+    // Safety cleanup for polling interval when unmounting
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+        };
+    }, []);
 
     const handleDelete = async (documentId: string, filename: string | null) => {
         const label = filename ?? "this document";
@@ -84,7 +97,6 @@ export default function DocumentsPage() {
         try {
             const res = await authedFetch(`/documents/${documentId}`, { method: "DELETE" });
             if (!res.ok) throw new Error(`Failed to delete document (${res.status})`);
-            // Optimistic removal — don't wait on a full refetch for a doc we know is gone
             setDocs((prev) => prev.filter((d) => d.document_id !== documentId));
         } catch (err) {
             setErrorMessage(err instanceof Error ? err.message : "Failed to delete document.");
@@ -117,6 +129,13 @@ export default function DocumentsPage() {
                 const created = await createRes.json();
                 const documentId = created.document_id;
 
+                await fetchDocs(true);
+                
+                // Start polling silently in background
+                pollRef.current = setInterval(() => {
+                    fetchDocs(true);
+                }, STATUS_POLL_INTERVAL_MS);
+
                 const formData = new FormData();
                 formData.append("document_id", documentId);
                 formData.append("tenant_id", tenantId);
@@ -126,6 +145,7 @@ export default function DocumentsPage() {
                     method: "POST",
                     body: formData,
                 });
+
                 if (!uploadRes.ok) {
                     let message = "Upload failed. Please try again.";
                     if (uploadRes.status === 400 || uploadRes.status === 422) {
@@ -133,7 +153,7 @@ export default function DocumentsPage() {
                             const errBody = await uploadRes.json();
                             message = errBody.detail ?? errBody.message ?? message;
                         } catch {
-                            // response wasn't JSON — fall back to the generic message
+                            // non-JSON fallback
                         }
                     }
                     throw new Error(message);
@@ -141,10 +161,16 @@ export default function DocumentsPage() {
 
                 setStatus("success");
                 setTheme("");
-                await fetchDocs();
+                await fetchDocs(true);
             } catch (err) {
                 setStatus("error");
                 setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+            } finally {
+                if (pollRef.current) {
+                    clearInterval(pollRef.current);
+                    pollRef.current = null;
+                }
+                await fetchDocs(true);
             }
         },
     });

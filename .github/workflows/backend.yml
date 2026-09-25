@@ -1,20 +1,15 @@
-#backend yaml file
 name: Backend CI
 
 on:
   pull_request:
-    paths:
-      - "backend/**"
-  push:
-    branches: [main]
-    paths:
-      - "backend/**"
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'backend/**'
       - '.github/workflows/backend.yml'
   push:
     branches:
+      - main
       - add-frontend-ci
     paths:
       - 'backend/**'
@@ -23,6 +18,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
     services:
       db:
         image: pgvector/pgvector:pg16
@@ -37,21 +37,32 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
       - name: Install dependencies
-        working-directory: backend
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install ruff pytest
+
+      - name: Lint with Ruff
+        run: ruff check . --ignore B008
+
       - name: Build Docker image (sanity check)
-        run: docker build -t helpdesk-backend ./backend
+        run: docker build -t helpdesk-backend .
+
       - name: Run smoke tests against a live uvicorn instance
-        working-directory: backend
         env:
           TEST_BASE_URL: http://localhost:8000
           TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
@@ -62,26 +73,3 @@ jobs:
           uvicorn main:app --host 0.0.0.0 --port 8000 &
           sleep 3
           pytest tests/ -v
-    defaults:
-      run:
-        working-directory: backend
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-          cache: 'pip'
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install ruff pytest
-
-      - name: Lint with Ruff
-        run: ruff check . --ignore B008
-
-      - name: Run tests
-        run: pytest

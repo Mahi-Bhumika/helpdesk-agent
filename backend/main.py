@@ -114,7 +114,53 @@ async def update_document(
     await db.commit()
     return dict(result.fetchone()._mapping)
 
+#deleting a document
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await db.execute(
+        text("SELECT document_id, tenant_id FROM documents WHERE document_id = :document_id"),
+        {"document_id": document_id}
+    )
+    row = existing.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if str(row.tenant_id) != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
 
+    # Delete child rows first, in dependency order — no ON DELETE CASCADE
+    # confirmed at the schema level, so this is explicit rather than assumed.
+
+    # message_sources references document_chunks.chunk_id — clear those first,
+    # or deleting a chunk that was ever cited in a past chat answer would 409
+    # on the foreign key.
+    await db.execute(
+        text("""
+            DELETE FROM message_sources
+            WHERE chunk_id IN (
+                SELECT chunk_id FROM document_chunks WHERE document_id = :document_id
+            )
+        """),
+        {"document_id": document_id},
+    )
+
+    # Now safe to delete the chunks themselves
+    await db.execute(
+        text("DELETE FROM document_chunks WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+
+    # Finally the document row itself
+    await db.execute(
+        text("DELETE FROM documents WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+
+    await db.commit()
+    return {"status": "deleted", "document_id": document_id}
 
 # POST — create a new document
 class DocumentCreate(BaseModel):
@@ -369,8 +415,16 @@ _IDENTITY_STATUS_PATTERN = re.compile(
 
 _ENUMERATION_PATTERNS = re.compile(
     r"\b("
-    r"list\s+all|full\s+list|all\s+products|all\s+services|what\s+(services|products|items)\s+do\s+you\s+(offer|have|sell)|"
-    r"everything\s+you\s+(offer|have|sell)|catalog|show\s+all|complete\s+list|what\s+do\s+you\s+offer"
+    # "list all" / "list of all" / "a list of everything" — the old pattern
+    # required "list" and "all" adjacent, so "a list of all you have" (a very
+    # common real phrasing) never matched. (of\s+)? makes the "of" optional.
+    r"list\s+(of\s+)?(all|everything)|full\s+list|complete\s+list|"
+    r"all\s+(of\s+)?(the\s+|your\s+)?(products|services|items|things)|"
+    r"what\s+(services|products|items)\s+do\s+you\s+(offer|have|sell)|"
+    r"everything\s+you\s+(offer|have|sell)|catalog|"
+    r"show\s+(me\s+)?(all|everything)|"
+    r"what\s+do\s+you\s+(offer|sell|have)|"
+    r"what\s+all\s+(do\s+you\s+)?(have|offer|sell)"
     r")\b",
     re.IGNORECASE
 )
@@ -474,6 +528,26 @@ def is_enumeration_query(question: str) -> bool:
 def is_summary_query(question: str) -> bool:
     """Detects requests asking for a summary/overview."""
     return bool(_SUMMARY_PATTERNS.search(question))
+
+
+# Short "is there more?" follow-ups. Distinct from _FOLLOWUP_TRIGGERS (which
+# just decides whether to rewrite the query) — these specifically mean "have
+# you told me everything," which needs a different reply than the generic
+# fallback when the honest answer is "yes, that's the full list."
+_CONTINUATION_TRIGGERS = [
+    "and?", "anything else", "any other", "any others", "others",
+    "other options", "what else", "more options", "any more",
+    "is that all", "is that it", "thats it", "that's it",
+    "what about the rest", "more",
+]
+
+
+def is_continuation_query(question: str) -> bool:
+    """Detects a short 'anything else / is that all?' style follow-up."""
+    q = question.strip().lower().rstrip("?!.")
+    if not q or len(q.split()) > 6:
+        return False
+    return q == "and" or any(t.rstrip("?!.") in q for t in _CONTINUATION_TRIGGERS)
 
 
 # --- Query Reformulation Logic ---
@@ -644,7 +718,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     # 5. Query Classification & Vector Retrieval Config
     is_enum = is_enumeration_query(query.question)
     is_summary = is_summary_query(query.question)
-    
+    is_continuation = is_continuation_query(query.question)
+
     retrieval_query_text = query.question
 
     # Rewrite runs for ANY short/contextual follow-up, including enumeration
@@ -661,9 +736,12 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     query_embedding = embed_chunks([retrieval_query_text])[0]
     
-    # Expand retrieval scope for enumeration or summary queries
-    effective_top_k = ENUMERATION_TOP_K if (is_enum or is_summary) else top_k
-    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if (is_enum or is_summary) else SIMILARITY_THRESHOLD
+    # Expand retrieval scope for enumeration, summary, or "is there more?"
+    # queries — the last one needs the wide net too, since we can only tell
+    # someone "that's everything" in good faith if we actually looked broadly.
+    _wide_scope = is_enum or is_summary or is_continuation
+    effective_top_k = ENUMERATION_TOP_K if _wide_scope else top_k
+    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if _wide_scope else SIMILARITY_THRESHOLD
 
     # 6. Database Vector Search
     search_query = text("""
@@ -692,7 +770,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     # is right there. If nothing cleared the bar, accept the single best
     # match as long as it's still reasonably close (>= RELAXED_RETRY_FLOOR).
     # Enumeration/summary queries already use a wide net, so they're excluded.
-    if not retrieved_chunks and rows and not (is_enum or is_summary):
+    if not retrieved_chunks and rows and not _wide_scope:
         best = rows[0]
         if (1 - best.distance) >= RELAXED_RETRY_FLOOR:
             retrieved_chunks = [dict(best._mapping)]
@@ -701,20 +779,55 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
+    # 7b. "Anything else?" resolution: if this is a continuation query, check
+    # whether the chunks it just retrieved are all chunks that were already
+    # cited earlier in this session. If so, the honest answer isn't "I don't
+    # understand" — it's "that's everything." We only make this call when
+    # something was genuinely already discussed (already_cited_ids non-empty);
+    # otherwise this falls through to the normal path below.
+    no_more_items = False
+    if is_continuation and history_rows:
+        prior_sources_result = await db.execute(
+            text("""
+                SELECT DISTINCT ms.chunk_id
+                FROM message_sources ms
+                JOIN messages m ON m.message_id = ms.message_id
+                WHERE m.session_id = CAST(:session_id AS uuid)
+            """),
+            {"session_id": session_id},
+        )
+        already_cited_ids = {str(r.chunk_id) for r in prior_sources_result.fetchall()}
+        new_chunk_ids = {str(c["chunk_id"]) for c in retrieved_chunks} - already_cited_ids
+        no_more_items = bool(already_cited_ids) and not new_chunk_ids
+
     # 8. Construct Prompt Instructions
-    system_prompt = (
-        f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
-        "Use plain, clear, conversational language without headers. Default to 2-4 short sentences.\n\n"
-        "Formatting Exceptions:\n"
-        "1. Step-by-step requests: Use a short, clear numbered list.\n"
-        "2. List/Catalog/Summary requests: Compile a clear, comprehensive bullet-point list using all relevant facts in the 'Retrieved Context'.\n"
-        "3. Mid-conversation acknowledgments (e.g., 'thanks', 'got it'): Respond warmly in 1 short sentence without triggering fallback.\n\n"
-        "STRICT CONTEXT RULE: You may ONLY answer using factual information explicitly found in the 'Retrieved Context' below. "
-        "Do not invent facts, assume details, or draw on external knowledge.\n\n"
-        "If the requested information is NOT present in the Retrieved Context, output strictly and exactly this message and nothing else:\n"
-        f'"{fallback_text}"\n\n'
-        "Use conversation history only to understand follow-up references (e.g., 'it', 'that price', 'tell me more') — never as an independent source of unverified facts."
-    )
+    if no_more_items:
+        # Dedicated prompt for this branch: confirm, don't apologize. The
+        # STRICT CONTEXT RULE prompt below would otherwise have no way to
+        # distinguish "off-topic" from "you've now heard the full list," and
+        # would output the generic fallback for both.
+        system_prompt = (
+            f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
+            "The user is asking if there's anything else / any other options, as a follow-up to what you already "
+            "told them earlier in this conversation. The Retrieved Context below contains nothing beyond what was "
+            "already discussed — meaning what you already mentioned is the complete offering in that category.\n"
+            "Reply in one short, warm sentence confirming that's everything currently available in that category. "
+            "Do NOT say you don't understand, do NOT ask them to rephrase, and do NOT invent any new items."
+        )
+    else:
+        system_prompt = (
+            f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
+            "Use plain, clear, conversational language without headers. Default to 2-4 short sentences.\n\n"
+            "Formatting Exceptions:\n"
+            "1. Step-by-step requests: Use a short, clear numbered list.\n"
+            "2. List/Catalog/Summary requests: Compile a clear, comprehensive bullet-point list using all relevant facts in the 'Retrieved Context'.\n"
+            "3. Mid-conversation acknowledgments (e.g., 'thanks', 'got it'): Respond warmly in 1 short sentence without triggering fallback.\n\n"
+            "STRICT CONTEXT RULE: You may ONLY answer using factual information explicitly found in the 'Retrieved Context' below. "
+            "Do not invent facts, assume details, or draw on external knowledge.\n\n"
+            "If the requested information is NOT present in the Retrieved Context, output strictly and exactly this message and nothing else:\n"
+            f'"{fallback_text}"\n\n'
+            "Use conversation history only to understand follow-up references (e.g., 'it', 'that price', 'tell me more') — never as an independent source of unverified facts."
+        )
 
     llm_messages = [{"role": "system", "content": system_prompt}]
     for h in history_rows:
@@ -745,8 +858,10 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # 11. Store Citations & Commit
     sources = []
-    # Store citations only if context was found and fallback wasn't triggered
-    if retrieved_chunks and answer.strip() != fallback_text.strip():
+    # Store citations only if context was found, fallback wasn't triggered,
+    # and this isn't the "no_more_items" branch (those chunks were already
+    # cited against an earlier message in this session — no need to duplicate).
+    if retrieved_chunks and answer.strip() != fallback_text.strip() and not no_more_items:
         source_rows = [
             {
                 "message_id": bot_message_id,

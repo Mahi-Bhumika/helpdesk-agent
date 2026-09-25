@@ -476,6 +476,36 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
         print(f"[DEBUG] Query rewrite failed: {e}")
         return question
 
+
+class ChatQuery(BaseModel):
+    tenant_id: str
+    session_id: Optional[str] = None
+    question: str
+    top_k: int = 5
+ 
+ 
+class ChatSource(BaseModel):
+    chunk_id: str
+    relevance_score: float
+ 
+class ChatResponse(BaseModel):
+    session_id: str
+    answer: str
+    sources: list[ChatSource]
+ 
+# Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
+# this (1 - cosine_distance) are treated as not relevant enough to answer from.
+SIMILARITY_THRESHOLD = 0.35
+ 
+# Separate, looser settings for detected "list everything" queries — the goal
+# there is coverage, not precision, so cast a much wider net: more chunks,
+# and a much lower bar for "relevant enough to include." Still bounded, not
+# unlimited — 25 chunks is generous for this project's real chunk counts
+# (a few dozen per document) without risking an oversized LLM prompt.
+ENUMERATION_TOP_K = 25
+ENUMERATION_SIMILARITY_THRESHOLD = 0.15
+ 
+
 # --- Primary Endpoint ---
 
 @app.post("/chat", response_model=ChatResponse)

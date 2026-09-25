@@ -553,10 +553,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Smalltalk check — BEFORE retrieval, so a greeting or a plain
-    # "thanks"/"okay" never pays for an embedding call or a vector search.
-    # Two separate replies: repeating the greeting message back at someone
-    # who just said "thanks" would read as broken, not helpful.
+    # Step 2: Smalltalk check
     smalltalk_kind = classify_smalltalk(query.question)
     if smalltalk_kind:
         if smalltalk_kind == "greeting":
@@ -564,10 +561,12 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         else:  # "acknowledgment"
             reply = "You're welcome! Let me know if there's anything else I can help with."
 
+        # Insert user message first
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
         )
+        # Insert bot reply
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
@@ -607,6 +606,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     is_enum = is_enumeration_query(query.question)
 
     retrieval_query_text = query.question
+    if retrieval_query_text != query.question:
+        print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
     if not is_enum and _needs_query_rewrite(query.question, history_rows):
         retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
 

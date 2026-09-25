@@ -4,10 +4,9 @@ import os as os_module
 
 import time
 
-
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession

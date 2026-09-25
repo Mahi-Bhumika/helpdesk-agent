@@ -335,17 +335,8 @@ async def upload_document(
         "chunks_inserted": len(chunks),
     }
 
-
-import re
-
-from urllib.parse import urlparse
-
 def extract_origin(url_or_domain: str) -> str:
-    """
-    Normalizes whatever got saved in website_domain — a bare domain,
-    a full URL, or a URL with a path — down to just scheme://host,
-    matching the exact format browsers send in the Origin header.
-    """
+    """Normalizes domain or full URL down to scheme://host."""
     if not url_or_domain:
         return ""
     if not url_or_domain.startswith(("http://", "https://")):
@@ -353,168 +344,16 @@ def extract_origin(url_or_domain: str) -> str:
     parsed = urlparse(url_or_domain)
     return f"{parsed.scheme}://{parsed.netloc}"
 
-_GREETING_PATTERNS = re.compile(
-    r"^\s*(hi|hii+|hey|hello|yo|sup|good\s?(morning|afternoon|evening)|howdy|hola)\s*[!.?]*\s*$",
-    re.IGNORECASE,
-)
 
-_ACKNOWLEDGMENT_PATTERNS = re.compile(
-    r"^\s*(thanks?|thank\s?you+|thx|ty|tysm|ok(ay)?|okie|got\s?it|cool|great|perfect|"
-    r"alright|sounds\s?good|awesome|nice(\s?one)?|sure|no\s?problem|np)\s*[!.?]*\s*$",
-    re.IGNORECASE,
-)
+# --- Regex Compiled Patterns ---
 
-def classify_smalltalk(question: str) -> Optional[str]:
-    """
-    Detects short messages that shouldn't go through retrieval at all.
-    Returns 'greeting', 'acknowledgment', or None (meaning: run retrieval
-    normally). Kept as two categories, not one, because they need
-    different canned replies — repeating the greeting message back at
-    someone who just said "thanks" reads as broken, not helpful.
-    """
-    q = question.strip()
-    if len(q) > 25:
-        return None
-    if _GREETING_PATTERNS.match(q):
-        return "greeting"
-    if _ACKNOWLEDGMENT_PATTERNS.match(q):
-        return "acknowledgment"
-    return None
-
-
-SHORT_QUESTION_CHAR_LIMIT = 40
-
-def _needs_query_rewrite(question: str, history_rows: list) -> bool:
-    """
-    Decides whether the retrieval query needs rewriting before embedding.
-
-    Deliberately NOT keyword-based. A fixed phrase list ("tell me more",
-    "what else") will always miss real phrasings people actually type —
-    "how much?", "the price?", "yes please" are all genuine follow-ups
-    that depend entirely on the previous turn, and none of them match any
-    reasonable keyword list. Triggering on message SHAPE (short + a real
-    conversation already exists) instead of specific words covers all of
-    these, and anything else worded just as briefly, without needing to
-    predict the exact wording in advance.
-
-    A short but genuinely standalone new question ("refund policy?") will
-    also trigger this — that's an accepted, safe tradeoff: the rewrite
-    prompt below is explicitly instructed to leave already-standalone
-    questions unchanged, so the cost is one extra fast LLM call, not a
-    wrong answer.
-    """
-    if not history_rows:
-        return False
-    return len(question.strip()) <= SHORT_QUESTION_CHAR_LIMIT
-
-
-def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
-    """
-    Uses one fast Groq call to turn a short, context-dependent question
-    into a standalone search query, using the recent conversation for
-    context — e.g. "how much?" after a message about the Summit 400
-    becomes "What is the price of the Summit 400 headphones?" before
-    being embedded for pgvector search.
-
-    This ONLY affects what gets embedded and searched. The LLM that
-    generates the actual user-facing answer still sees the real, original
-    question text — this step exists purely to fix retrieval, not to
-    change what the bot appears to have been asked.
-
-    Falls back to the raw question on any failure (network hiccup, rate
-    limit, malformed response) rather than letting a non-critical
-    enhancement step turn into a new source of /chat errors.
-    """
-    history_text = "\n".join(f"{h.sender}: {h.content}" for h in history_rows)
-    rewrite_prompt = (
-        "Rewrite the user's latest message into a short, standalone search "
-        "query, using the conversation history to fill in anything it "
-        "depends on (a product name, a topic, what 'it' or 'that' refers "
-        "to). Output ONLY the rewritten query — no quotes, no explanation. "
-        "If the message is already standalone and doesn't depend on the "
-        "history, output it unchanged.\n\n"
-        f"Conversation history:\n{history_text}\n\n"
-        f"Latest message: {question}\n\n"
-        "Standalone search query:"
-    )
-    try:
-        completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": rewrite_prompt}],
-            max_tokens=60,
-            temperature=0,
-        )
-        rewritten = (completion.choices[0].message.content or "").strip().strip('"')
-        return rewritten if rewritten else question
-    except Exception as e:
-        print(f"[DEBUG] Query rewrite failed, using raw question instead: {e}")
-        return question
-
-
-_ENUMERATION_PATTERNS = re.compile(
-    r"(full\s?list|list\s?(of\s?)?(all|every)|everything\s?(you|there\s?is)|"
-    r"all\s?(of\s?)?(your|the)?\s?(products?|items?|services?|plans?|options?|features?)|"
-    r"complete\s?list|show\s?me\s?(all|everything)|"
-    r"what\s?(products?|items?|services?|plans?)\s?do\s?you\s?(have|offer|sell|provide)|"
-    r"everything\s?(you\s?)?(have|offer|sell))",
-    re.IGNORECASE,
-)
-
-def is_enumeration_query(question: str) -> bool:
-    """
-    Detects broad "give me everything" style questions ("full list of all
-    products", "what services do you offer"). Deliberately NOT
-    length-capped — these can be phrased naturally at any length ("gimme
-    a full list of all products" is well over the 40-char rewrite
-    threshold above). Uses search() rather than match() since the
-    trigger phrase can appear anywhere in the sentence, not just at the
-    start.
-
-    Vector similarity search is structurally the wrong tool for this
-    shape of question: it finds the single most semantically similar
-    chunk(s) to the literal query text, but an exhaustive answer usually
-    needs many chunks that are each only weakly similar to the phrase
-    "full list of all products" on their own (a chunk about one specific
-    item rarely scores high against that exact wording). The normal
-    top_k=5 + 0.35-threshold search is tuned for precision on a single
-    fact, not coverage across a whole catalog — so it needs a separate,
-    much wider retrieval pass rather than a parameter tweak to the
-    existing one.
-    """
-    return bool(_ENUMERATION_PATTERNS.search(question))
-
-
-class ChatSource(BaseModel):
-    chunk_id: str
-    relevance_score: float
-
-class ChatQuery(BaseModel):
-    tenant_id: str
-    question: str
-    session_id: Optional[str] = None
-    top_k: int = 5
-
-class ChatResponse(BaseModel):
-    session_id: str
-    answer: str
-    sources: list[ChatSource]
-
-# --- Constants & Thresholds ---
-
-SIMILARITY_THRESHOLD = 0.35
-ENUMERATION_TOP_K = 25
-ENUMERATION_SIMILARITY_THRESHOLD = 0.15
-
-# --- Smalltalk & Intent Patterns ---
-
-# Regex patterns for smalltalk variants (handles trailing repeated characters, punctuation, etc.)
 _GREETING_PATTERN = re.compile(
-    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|good\s*(morning|afternoon|evening)|yo+)\b",
+    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|good\s*(morning|afternoon|evening)|yo+|sup)\b",
     re.IGNORECASE
 )
 
 _ACKNOWLEDGMENT_PATTERN = re.compile(
-    r"^\s*(thank\s*you|thanks|cool+|ok+|okay+|got\s*it|makes\s*sense|perfect+|awesome+|great+)\b",
+    r"^\s*(thanks?|thank\s*you+|thx|ty|tysm|ok(ay)?|okie|got\s*it|cool|great|perfect|alright|sounds\s*good|awesome|nice|sure|no\s*problem|np)\b",
     re.IGNORECASE
 )
 
@@ -523,7 +362,6 @@ _IDENTITY_STATUS_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Broad catalog / exhaustive enumeration queries
 _ENUMERATION_PATTERNS = re.compile(
     r"\b("
     r"list\s+all|full\s+list|all\s+products|all\s+services|what\s+(services|products|items)\s+do\s+you\s+(offer|have|sell)|"
@@ -532,7 +370,6 @@ _ENUMERATION_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-# Request for summaries
 _SUMMARY_PATTERNS = re.compile(
     r"\b("
     r"summarize|summary|give\s+me\s+a\s+summary|brief\s+overview|recap|tl;?dr"
@@ -540,75 +377,70 @@ _SUMMARY_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-# Follow-up intent indicators needing query rewriting
 _FOLLOWUP_TRIGGERS = [
     "tell me more", "more details", "how much", "price", "cost",
     "and the other", "what about", "the other one", "both", "this",
     "that", "these", "it", "how much is it", "why", "where",
-    "can i get", "is it available", "how do i"
+    "can i get", "is it available", "how do i", "any other", "other options",
+    "what else", "and?", "and", "anything else", "more", "others"
 ]
 
 
-# --- Helper Functions ---
-
-def normalize_text(text_input: str) -> str:
-    """Strips trailing punctuation and collapses trailing repeated characters."""
-    cleaned = text_input.strip()
-    cleaned = re.sub(r"(.)\1+$", r"\1", cleaned)
-    return cleaned.rstrip("!.,? ").lower()
+# --- Classification & Intent Helpers ---
 
 def classify_smalltalk(question: str, has_history: bool = False) -> Optional[tuple[str, str]]:
     """
-    Classifies standalone smalltalk inputs into categories (greeting, ack, identity).
-    If additional conversational content follows the smalltalk (e.g. 'hi, how much is X?'),
-    it returns None so the query passes into the RAG engine.
+    Classifies standalone smalltalk (greetings, acknowledgments, identity questions).
+    Bypasses smalltalk if the message contains > 5 words to prevent capturing contextual queries.
     """
     raw_cleaned = question.strip()
     word_count = len(raw_cleaned.split())
-    
-    # If the user typed more than 4 words, treat it as a contextual query, not standard smalltalk
-    if word_count > 4:
+
+    if word_count > 5:
         return None
 
-    # Check Identity / Bot Status
     if _IDENTITY_STATUS_PATTERN.search(raw_cleaned):
-        return ("identity", "I am an AI customer support assistant here to help answer your questions based on our knowledge base.")
+        return ("identity", "I am an AI support assistant here to help answer your questions based on our knowledge base.")
 
-    # Check Greetings
     if _GREETING_PATTERN.search(raw_cleaned):
         return ("greeting", "greeting_placeholder")
 
-    # Check Standalone Acknowledgments (Only treat as fast-path canned response if NO dialog history exists)
-    if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned) and not has_history:
+    if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned):
         return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
 
     return None
 
 def is_enumeration_query(question: str) -> bool:
-    """Detects whether a query requires retrieving a wide broad catalog."""
+    """Detects exhaustive catalog listing requests."""
     return bool(_ENUMERATION_PATTERNS.search(question))
 
 def is_summary_query(question: str) -> bool:
-    """Detects whether the user is explicitly requesting a summary/overview."""
+    """Detects requests asking for a summary/overview."""
     return bool(_SUMMARY_PATTERNS.search(question))
 
+
+# --- Query Reformulation Logic ---
+
 def _needs_query_rewrite(question: str, history_rows: list) -> bool:
-    """Determines if a question depends on previous turns to make full sense."""
+    """
+    Triggers query rewriting if there is conversation history AND either:
+    1. The question is short (<= 6 words).
+    2. The question contains implicit context triggers ('and?', 'what about', 'how much').
+    """
     if not history_rows:
         return False
 
     q_lower = question.strip().lower()
 
-    if any(trigger in q_lower for trigger in _FOLLOWUP_TRIGGERS):
+    if len(q_lower.split()) <= 6:
         return True
 
-    # Short queries (< 6 words) with active dialogue history usually imply a follow-up reference
-    return len(q_lower.split()) <= 5
+    return any(trigger in q_lower for trigger in _FOLLOWUP_TRIGGERS)
 
 def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
-    """Rephrases implicit follow-up queries into explicit standalone search strings."""
+    """Rephrases follow-up questions into standalone search queries using Groq."""
     history_str = "\n".join([
-        f"{'User' if h.sender == 'user' else 'Assistant'}: {h.content}"
+        f"{'User' if getattr(h, 'sender', '') == 'user' else 'Assistant'}: {getattr(h, 'content', '')}"
         for h in history_rows[-4:]
     ])
 
@@ -632,12 +464,13 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
             model="llama-3.1-8b-instant",
             messages=rewrite_prompt,
             temperature=0.0,
+            max_tokens=60,
         )
-        return response.choices[0].message.content.strip()
+        rewritten = response.choices[0].message.content.strip().strip('"')
+        return rewritten if rewritten else question
     except Exception as e:
         print(f"[DEBUG] Query rewrite failed: {e}")
         return question
-
 
 # --- Primary Endpoint ---
 

@@ -3,6 +3,12 @@ name: Backend CI
 
 on:
   pull_request:
+    paths:
+      - "backend/**"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
     branches: [main]
     paths:
       - 'backend/**'
@@ -17,6 +23,45 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: helpdesk_agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Build Docker image (sanity check)
+        run: docker build -t helpdesk-backend ./backend
+      - name: Run smoke tests against a live uvicorn instance
+        working-directory: backend
+        env:
+          TEST_BASE_URL: http://localhost:8000
+          TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
+          TEST_ORIGIN: ${{ secrets.TEST_ORIGIN }}
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/helpdesk_agent_test
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          sleep 3
+          pytest tests/ -v
     defaults:
       run:
         working-directory: backend

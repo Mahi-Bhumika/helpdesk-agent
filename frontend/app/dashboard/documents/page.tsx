@@ -1,7 +1,7 @@
-"use client"
+"use client";
 
 import { useDropzone } from "react-dropzone";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { X } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { supabase } from "@/lib/supabase";
@@ -48,6 +48,8 @@ function StatusPill({ status }: { status: string }) {
     );
 }
 
+const STATUS_POLL_INTERVAL_MS = 1500;
+
 export default function DocumentsPage() {
     const { tenantId } = useAuth();
     const [theme, setTheme] = useState("");
@@ -56,10 +58,10 @@ export default function DocumentsPage() {
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const fetchDocs = useCallback(async () => {
         if (!tenantId) return;
-        setLoadingDocs(true);
         const { data, error } = await supabase
             .from("documents")
             .select("document_id, file_url, format, theme, status, created_at")
@@ -67,13 +69,23 @@ export default function DocumentsPage() {
             .order("created_at", { ascending: false });
 
         if (!error && data) setDocs(data as Doc[]);
-        setLoadingDocs(false);
     }, [tenantId]);
 
+    // Initial fetch on mount with loading indicator
     useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount, not a derived-state mirror
-        fetchDocs();
+        (async () => {
+            setLoadingDocs(true);
+            await fetchDocs();
+            setLoadingDocs(false);
+        })();
     }, [fetchDocs]);
+
+    // Stop any in-flight poll if the component unmounts mid-upload.
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+        };
+    }, []);
 
     const handleDelete = async (documentId: string, filename: string | null) => {
         const label = filename ?? "this document";
@@ -117,6 +129,9 @@ export default function DocumentsPage() {
                 const created = await createRes.json();
                 const documentId = created.document_id;
 
+                await fetchDocs();
+                pollRef.current = setInterval(fetchDocs, STATUS_POLL_INTERVAL_MS);
+
                 const formData = new FormData();
                 formData.append("document_id", documentId);
                 formData.append("tenant_id", tenantId);
@@ -133,7 +148,7 @@ export default function DocumentsPage() {
                             const errBody = await uploadRes.json();
                             message = errBody.detail ?? errBody.message ?? message;
                         } catch {
-                            // response wasn't JSON — fall back to the generic message
+                            // response wasn't JSON — fall back to default
                         }
                     }
                     throw new Error(message);
@@ -141,10 +156,15 @@ export default function DocumentsPage() {
 
                 setStatus("success");
                 setTheme("");
-                await fetchDocs();
             } catch (err) {
                 setStatus("error");
                 setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+            } finally {
+                if (pollRef.current) {
+                    clearInterval(pollRef.current);
+                    pollRef.current = null;
+                }
+                await fetchDocs();
             }
         },
     });

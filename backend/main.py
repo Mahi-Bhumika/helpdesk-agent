@@ -181,7 +181,12 @@ async def create_document(
         VALUES (:tenant_id, :uploaded_by, :file_url, :format, :theme)
         RETURNING document_id, tenant_id, status, created_at
     """)
-    result = await db.execute(query, doc.model_dump())
+    result = await db.execute(query, {
+        **doc.model_dump(),
+        # server-derived from the verified JWT, never trusted from the client —
+        # same pattern already used for tenant_id elsewhere in this file
+        "uploaded_by": current_user["user_id"],
+    })
     await db.commit()
     return dict(result.fetchone()._mapping)
 
@@ -281,6 +286,16 @@ async def upload_document(
     if tenant_id != current_user["tenant_id"]:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
+    # Flip to 'processing' immediately, committed on its own — this is the
+    # real status while parsing/chunking/embedding are running, rather than
+    # jumping straight from 'uploaded' to 'ready'/'failed' with a long silent
+    # gap. Uploaded (POST /documents) -> Processing (this line) -> Ready/Failed.
+    await db.execute(
+        text("UPDATE documents SET status = 'processing' WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+    await db.commit()
+
     # Save the uploaded file to a temp path so pdfplumber can read it
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         contents = await file.read()
@@ -289,7 +304,20 @@ async def upload_document(
 
     try:
         t0 = time.time()
-        extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        try:
+            extracted_text = await asyncio.to_thread(extract_text, tmp_path)
+        except ValueError as e:
+            # extract_text() raises ValueError for two distinct real failures:
+            # a corrupted/unreadable PDF, or a fully-scanned document with zero
+            # extractable text on any page. Both are genuine upload failures,
+            # not a 500 — surface them clearly and mark the document as failed
+            # instead of letting an unhandled exception fall through.
+            await db.execute(
+                text("UPDATE documents SET status = 'failed' WHERE document_id = :document_id"),
+                {"document_id": document_id},
+            )
+            await db.commit()
+            raise HTTPException(status_code=422, detail=str(e))
         print(f"extract_text took {time.time() - t0:.2f}s")
 
         t1 = time.time()
@@ -336,6 +364,15 @@ async def upload_document(
         ]
 
         await db.execute(insert_query, rows)
+
+        # Mark the document ready in the SAME transaction as the chunk inserts,
+        # so status only ever reflects reality — this update was missing
+        # entirely before, leaving every successful upload's status stuck
+        # wherever it started (e.g. permanently 'uploading').
+        await db.execute(
+            text("UPDATE documents SET status = 'ready' WHERE document_id = :document_id"),
+            {"document_id": document_id},
+        )
         await db.commit()
 
     finally:
@@ -369,15 +406,130 @@ _GREETING_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-def is_smalltalk(question: str) -> bool:
+_ACKNOWLEDGMENT_PATTERNS = re.compile(
+    r"^\s*(thanks?|thank\s?you+|thx|ty|tysm|ok(ay)?|okie|got\s?it|cool|great|perfect|"
+    r"alright|sounds\s?good|awesome|nice(\s?one)?|sure|no\s?problem|np)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+def classify_smalltalk(question: str) -> Optional[str]:
     """
-    Detects short greeting-only messages so we can skip retrieval
-    and answer naturally instead of dumping document context.
+    Detects short messages that shouldn't go through retrieval at all.
+    Returns 'greeting', 'acknowledgment', or None (meaning: run retrieval
+    normally). Kept as two categories, not one, because they need
+    different canned replies — repeating the greeting message back at
+    someone who just said "thanks" reads as broken, not helpful.
     """
     q = question.strip()
     if len(q) > 25:
+        return None
+    if _GREETING_PATTERNS.match(q):
+        return "greeting"
+    if _ACKNOWLEDGMENT_PATTERNS.match(q):
+        return "acknowledgment"
+    return None
+
+
+SHORT_QUESTION_CHAR_LIMIT = 40
+
+def _needs_query_rewrite(question: str, history_rows: list) -> bool:
+    """
+    Decides whether the retrieval query needs rewriting before embedding.
+
+    Deliberately NOT keyword-based. A fixed phrase list ("tell me more",
+    "what else") will always miss real phrasings people actually type —
+    "how much?", "the price?", "yes please" are all genuine follow-ups
+    that depend entirely on the previous turn, and none of them match any
+    reasonable keyword list. Triggering on message SHAPE (short + a real
+    conversation already exists) instead of specific words covers all of
+    these, and anything else worded just as briefly, without needing to
+    predict the exact wording in advance.
+
+    A short but genuinely standalone new question ("refund policy?") will
+    also trigger this — that's an accepted, safe tradeoff: the rewrite
+    prompt below is explicitly instructed to leave already-standalone
+    questions unchanged, so the cost is one extra fast LLM call, not a
+    wrong answer.
+    """
+    if not history_rows:
         return False
-    return bool(_GREETING_PATTERNS.match(q))
+    return len(question.strip()) <= SHORT_QUESTION_CHAR_LIMIT
+
+
+def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
+    """
+    Uses one fast Groq call to turn a short, context-dependent question
+    into a standalone search query, using the recent conversation for
+    context — e.g. "how much?" after a message about the Summit 400
+    becomes "What is the price of the Summit 400 headphones?" before
+    being embedded for pgvector search.
+
+    This ONLY affects what gets embedded and searched. The LLM that
+    generates the actual user-facing answer still sees the real, original
+    question text — this step exists purely to fix retrieval, not to
+    change what the bot appears to have been asked.
+
+    Falls back to the raw question on any failure (network hiccup, rate
+    limit, malformed response) rather than letting a non-critical
+    enhancement step turn into a new source of /chat errors.
+    """
+    history_text = "\n".join(f"{h.sender}: {h.content}" for h in history_rows)
+    rewrite_prompt = (
+        "Rewrite the user's latest message into a short, standalone search "
+        "query, using the conversation history to fill in anything it "
+        "depends on (a product name, a topic, what 'it' or 'that' refers "
+        "to). Output ONLY the rewritten query — no quotes, no explanation. "
+        "If the message is already standalone and doesn't depend on the "
+        "history, output it unchanged.\n\n"
+        f"Conversation history:\n{history_text}\n\n"
+        f"Latest message: {question}\n\n"
+        "Standalone search query:"
+    )
+    try:
+        completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": rewrite_prompt}],
+            max_tokens=60,
+            temperature=0,
+        )
+        rewritten = (completion.choices[0].message.content or "").strip().strip('"')
+        return rewritten if rewritten else question
+    except Exception as e:
+        print(f"[DEBUG] Query rewrite failed, using raw question instead: {e}")
+        return question
+
+
+_ENUMERATION_PATTERNS = re.compile(
+    r"(full\s?list|list\s?(of\s?)?(all|every)|everything\s?(you|there\s?is)|"
+    r"all\s?(of\s?)?(your|the)?\s?(products?|items?|services?|plans?|options?|features?)|"
+    r"complete\s?list|show\s?me\s?(all|everything)|"
+    r"what\s?(products?|items?|services?|plans?)\s?do\s?you\s?(have|offer|sell|provide)|"
+    r"everything\s?(you\s?)?(have|offer|sell))",
+    re.IGNORECASE,
+)
+
+def is_enumeration_query(question: str) -> bool:
+    """
+    Detects broad "give me everything" style questions ("full list of all
+    products", "what services do you offer"). Deliberately NOT
+    length-capped — these can be phrased naturally at any length ("gimme
+    a full list of all products" is well over the 40-char rewrite
+    threshold above). Uses search() rather than match() since the
+    trigger phrase can appear anywhere in the sentence, not just at the
+    start.
+
+    Vector similarity search is structurally the wrong tool for this
+    shape of question: it finds the single most semantically similar
+    chunk(s) to the literal query text, but an exhaustive answer usually
+    needs many chunks that are each only weakly similar to the phrase
+    "full list of all products" on their own (a chunk about one specific
+    item rarely scores high against that exact wording). The normal
+    top_k=5 + 0.35-threshold search is tuned for precision on a single
+    fact, not coverage across a whole catalog — so it needs a separate,
+    much wider retrieval pass rather than a parameter tweak to the
+    existing one.
+    """
+    return bool(_ENUMERATION_PATTERNS.search(question))
 
 
 
@@ -400,6 +552,14 @@ class ChatResponse(BaseModel):
 # Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
 # this (1 - cosine_distance) are treated as not relevant enough to answer from.
 SIMILARITY_THRESHOLD = 0.35
+
+# Separate, looser settings for detected "list everything" queries — the goal
+# there is coverage, not precision, so cast a much wider net: more chunks,
+# and a much lower bar for "relevant enough to include." Still bounded, not
+# unlimited — 25 chunks is generous for this project's real chunk counts
+# (a few dozen per document) without risking an oversized LLM prompt.
+ENUMERATION_TOP_K = 25
+ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -440,11 +600,16 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # Step 2: Greeting check — BEFORE retrieval, so a "hi" never pays for
-    # an embedding call or a vector search. Uses is_smalltalk() (regex,
-    # handles punctuation) instead of an exact-match set.
-    if is_smalltalk(query.question):
-        greeting_msg = tenant.greeting_message or "Hello! How can I help you today?"
+    # Step 2: Smalltalk check — BEFORE retrieval, so a greeting or a plain
+    # "thanks"/"okay" never pays for an embedding call or a vector search.
+    # Two separate replies: repeating the greeting message back at someone
+    # who just said "thanks" would read as broken, not helpful.
+    smalltalk_kind = classify_smalltalk(query.question)
+    if smalltalk_kind:
+        if smalltalk_kind == "greeting":
+            reply = tenant.greeting_message or "Hello! How can I help you today?"
+        else:  # "acknowledgment"
+            reply = "You're welcome! Let me know if there's anything else I can help with."
 
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
@@ -452,11 +617,11 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": greeting_msg},
+            {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
         )
         await db.commit()
 
-        return ChatResponse(session_id=str(session_id), answer=greeting_msg, sources=[])
+        return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
     # Step 3: Fetch last 6 messages from conversation history for memory
     history_result = await db.execute(
@@ -472,7 +637,30 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     history_rows = list(reversed(history_result.fetchall()))
 
     # Step 4: Query vector store using Cosine Distance operator (<=>)
-    query_embedding = embed_chunks([query.question])[0]
+    #
+    # A short, context-dependent question ("how much?", "the price?",
+    # "yes please") has almost no standalone semantic content — embedded
+    # and searched as-is, it scores below the similarity threshold against
+    # every real chunk regardless of how relevant the actual topic is,
+    # forcing a false fallback. Rewriting it into a standalone query
+    # before embedding (see _rewrite_query_for_retrieval) fixes this
+    # generally, without needing to predict the exact wording in advance.
+    #
+    # An enumeration query ("full list of all products") is a different
+    # failure mode entirely — it doesn't need rewriting, it needs a wider
+    # net, so it gets its own top_k/threshold instead. The two are
+    # mutually exclusive by construction (a broad "list everything"
+    # question isn't also a short "tell me more"-shaped one).
+    is_enum = is_enumeration_query(query.question)
+
+    retrieval_query_text = query.question
+    if not is_enum and _needs_query_rewrite(query.question, history_rows):
+        retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
+
+    query_embedding = embed_chunks([retrieval_query_text])[0]
+
+    effective_top_k = ENUMERATION_TOP_K if is_enum else top_k
+    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if is_enum else SIMILARITY_THRESHOLD
 
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
@@ -484,14 +672,14 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     result = await db.execute(search_query, {
         "query_embedding": str(query_embedding),
         "tenant_id": query.tenant_id,
-        "top_k": top_k,
+        "top_k": effective_top_k,
     })
     rows = result.fetchall()
 
     # Step 5: Filter chunks using the similarity threshold
     retrieved_chunks = [
         dict(row._mapping) for row in rows
-        if (1 - row.distance) >= SIMILARITY_THRESHOLD
+        if (1 - row.distance) >= effective_threshold
     ]
 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
@@ -500,7 +688,12 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     # Step 6: Construct LLM messages with conversation memory
     system_prompt = (
         f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business. "
-        "Use plain conversational language without headers or bullet lists, defaulting to 2-4 short sentences.\n\n"
+        "Use plain conversational language without headers, defaulting to 2-4 short sentences. Two exceptions: "
+        "(1) if the question genuinely asks for a step-by-step process, a short numbered list is fine; "
+        "(2) if the question asks for a list, catalog, or everything available (e.g. 'list all your "
+        "products', 'what do you offer'), use all of the Retrieved Context provided to compile as complete "
+        "a bullet-point list as the context actually supports — don't artificially shorten it to 2-4 "
+        "sentences, and don't invent items the context doesn't mention.\n\n"
         "STRICT RULE — read carefully: You may ONLY answer using information found in the 'Retrieved Context' "
         "provided below. This applies to every kind of question, with no exceptions — factual questions, casual "
         "questions, personal questions, opinion questions, anything. You have no knowledge, opinions, preferences, "
@@ -522,6 +715,10 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     llm_messages.append({"role": "user", "content": user_prompt})
 
     print(f"[DEBUG] Question: {query.question}")
+    if is_enum:
+        print(f"[DEBUG] Enumeration query detected — top_k={effective_top_k}, threshold={effective_threshold}")
+    if retrieval_query_text != query.question:
+        print(f"[DEBUG] Retrieval query (rewritten from '{query.question}'): {retrieval_query_text}")
     print(f"[DEBUG] Context sent to LLM:\n{context}")
 
     completion = groq_client.chat.completions.create(
@@ -904,3 +1101,7 @@ async def get_session_messages(
         m["sources"] = sources_by_message.get(str(m["message_id"]), [])
 
     return messages
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}

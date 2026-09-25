@@ -497,68 +497,116 @@ class ChatQuery(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
-    sources: List[ChatSource]
+    sources: list[ChatSource]
 
+# --- Constants & Thresholds ---
 
 SIMILARITY_THRESHOLD = 0.35
 ENUMERATION_TOP_K = 25
 ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
+# --- Smalltalk & Intent Patterns ---
+
+# Regex patterns for smalltalk variants (handles trailing repeated characters, punctuation, etc.)
+_GREETING_PATTERN = re.compile(
+    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|good\s*(morning|afternoon|evening)|yo+)\b",
+    re.IGNORECASE
+)
+
+_ACKNOWLEDGMENT_PATTERN = re.compile(
+    r"^\s*(thank\s*you|thanks|cool+|ok+|okay+|got\s*it|makes\s*sense|perfect+|awesome+|great+)\b",
+    re.IGNORECASE
+)
+
+_IDENTITY_STATUS_PATTERN = re.compile(
+    r"^\s*(who\s*are\s*you|what\s*are\s*you|are\s*you\s*a\s*bot|how\s*are\s*you|what\s*is\s*your\s*name)\b",
+    re.IGNORECASE
+)
+
+# Broad catalog / exhaustive enumeration queries
+_ENUMERATION_PATTERNS = re.compile(
+    r"\b("
+    r"list\s+all|full\s+list|all\s+products|all\s+services|what\s+(services|products|items)\s+do\s+you\s+(offer|have|sell)|"
+    r"everything\s+you\s+(offer|have|sell)|catalog|show\s+all|complete\s+list|what\s+do\s+you\s+offer"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Request for summaries
+_SUMMARY_PATTERNS = re.compile(
+    r"\b("
+    r"summarize|summary|give\s+me\s+a\s+summary|brief\s+overview|recap|tl;?dr"
+    r")\b",
+    re.IGNORECASE
+)
+
+# Follow-up intent indicators needing query rewriting
+_FOLLOWUP_TRIGGERS = [
+    "tell me more", "more details", "how much", "price", "cost",
+    "and the other", "what about", "the other one", "both", "this",
+    "that", "these", "it", "how much is it", "why", "where",
+    "can i get", "is it available", "how do i"
+]
+
 
 # --- Helper Functions ---
 
-def classify_smalltalk(question: str, has_history: bool = False) -> Optional[str]:
-    """
-    Classifies standalone smalltalk.
-    If history exists, acknowledgments (e.g. 'ok', 'cool') are passed through to the 
-    LLM turn so it can acknowledge in context rather than dropping into a canned fast-path.
-    """
-    cleaned = question.strip().lower().rstrip("!.,?")
-    greetings = {
-        "hi", "hello", "hey", "heya", "good morning", "good evening", "good afternoon"
-    }
-    acknowledgments = {
-        "thanks", "thank you", "cool", "ok", "okay", "got it", "makes sense", "perfect"
-    }
+def normalize_text(text_input: str) -> str:
+    """Strips trailing punctuation and collapses trailing repeated characters."""
+    cleaned = text_input.strip()
+    cleaned = re.sub(r"(.)\1+$", r"\1", cleaned)
+    return cleaned.rstrip("!.,? ").lower()
 
-    # Strict standalone greetings without existing dialogue context
-    if cleaned in greetings:
-        return "greeting"
+def classify_smalltalk(question: str, has_history: bool = False) -> Optional[tuple[str, str]]:
+    """
+    Classifies standalone smalltalk inputs into categories (greeting, ack, identity).
+    If additional conversational content follows the smalltalk (e.g. 'hi, how much is X?'),
+    it returns None so the query passes into the RAG engine.
+    """
+    raw_cleaned = question.strip()
+    word_count = len(raw_cleaned.split())
+    
+    # If the user typed more than 4 words, treat it as a contextual query, not standard smalltalk
+    if word_count > 4:
+        return None
 
-    # Only treat standalone acknowledgments as canned responses if there is NO conversation history
-    if cleaned in acknowledgments and not has_history:
-        return "acknowledgment"
+    # Check Identity / Bot Status
+    if _IDENTITY_STATUS_PATTERN.search(raw_cleaned):
+        return ("identity", "I am an AI customer support assistant here to help answer your questions based on our knowledge base.")
+
+    # Check Greetings
+    if _GREETING_PATTERN.search(raw_cleaned):
+        return ("greeting", "greeting_placeholder")
+
+    # Check Standalone Acknowledgments (Only treat as fast-path canned response if NO dialog history exists)
+    if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned) and not has_history:
+        return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
 
     return None
 
+def is_enumeration_query(question: str) -> bool:
+    """Detects whether a query requires retrieving a wide broad catalog."""
+    return bool(_ENUMERATION_PATTERNS.search(question))
+
+def is_summary_query(question: str) -> bool:
+    """Detects whether the user is explicitly requesting a summary/overview."""
+    return bool(_SUMMARY_PATTERNS.search(question))
 
 def _needs_query_rewrite(question: str, history_rows: list) -> bool:
-    """
-    Determines if the question depends on conversation history to make sense.
-    """
+    """Determines if a question depends on previous turns to make full sense."""
     if not history_rows:
         return False
 
     q_lower = question.strip().lower()
-    followup_triggers = [
-        "tell me more", "more details", "how much", "price", "cost",
-        "and the other", "what about", "the other one", "both", "this",
-        "that", "these", "it", "how much is it", "cool how much", "why",
-        "where", "can I get", "is it available"
-    ]
 
-    if any(trigger in q_lower for trigger in followup_triggers):
+    if any(trigger in q_lower for trigger in _FOLLOWUP_TRIGGERS):
         return True
 
-    # Short queries with history usually imply an ongoing context reference
-    return len(q_lower.split()) <= 6
-
+    # Short queries (< 6 words) with active dialogue history usually imply a follow-up reference
+    return len(q_lower.split()) <= 5
 
 def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
-    """
-    Uses an LLM turn to resolve pronouns and implicit references into a
-    standalone vector search query.
-    """
+    """Rephrases implicit follow-up queries into explicit standalone search strings."""
     history_str = "\n".join([
         f"{'User' if h.sender == 'user' else 'Assistant'}: {h.content}"
         for h in history_rows[-4:]
@@ -570,7 +618,7 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
             "content": (
                 "You are a search query reformulation module. Given a conversation history and a follow-up user message, "
                 "rephrase the follow-up message into a complete, standalone search query containing all necessary entity "
-                "names and specifics from history. Output ONLY the rephrased search query, nothing else."
+                "names, products, and specifics from history. Output ONLY the rephrased search query, nothing else."
             ),
         },
         {
@@ -630,7 +678,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # 3. Fetch Conversation History (Last 6 Turns)
+    # 3. Fetch Active Conversation History (Last 6 Turns)
     history_result = await db.execute(
         text("""
             SELECT sender, content 
@@ -644,15 +692,15 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     history_rows = list(reversed(history_result.fetchall()))
 
     # 4. Context-Aware Smalltalk Fast-Path
-    # Passes has_history=bool(history_rows) to prevent dropping active contextual sessions into canned fallbacks.
-    smalltalk_kind = classify_smalltalk(query.question, has_history=bool(history_rows))
-    if smalltalk_kind:
-        reply = (
-            tenant.greeting_message or "Hello! How can I help you today?"
-            if smalltalk_kind == "greeting"
-            else "You're welcome! Let me know if there's anything else I can help with."
-        )
+    smalltalk_match = classify_smalltalk(query.question, has_history=bool(history_rows))
+    if smalltalk_match:
+        kind, canned_reply = smalltalk_match
+        if kind == "greeting":
+            reply = tenant.greeting_message or "Hello! How can I help you today?"
+        else:
+            reply = canned_reply
 
+        # Persist conversation turn
         await db.execute(
             text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
             {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
@@ -664,19 +712,23 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         await db.commit()
         return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
-    # 5. Query Rewriting & Embedding Strategy
+    # 5. Query Classification & Vector Retrieval Config
     is_enum = is_enumeration_query(query.question)
+    is_summary = is_summary_query(query.question)
+    
     retrieval_query_text = query.question
 
-    if not is_enum and _needs_query_rewrite(query.question, history_rows):
+    if not (is_enum or is_summary) and _needs_query_rewrite(query.question, history_rows):
         retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
         print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
 
     query_embedding = embed_chunks([retrieval_query_text])[0]
-    effective_top_k = ENUMERATION_TOP_K if is_enum else top_k
-    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if is_enum else SIMILARITY_THRESHOLD
+    
+    # Expand retrieval scope for enumeration or summary queries
+    effective_top_k = ENUMERATION_TOP_K if (is_enum or is_summary) else top_k
+    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if (is_enum or is_summary) else SIMILARITY_THRESHOLD
 
-    # 6. Vector Search Execution
+    # 6. Database Vector Search
     search_query = text("""
         SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
         FROM document_chunks
@@ -700,19 +752,19 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
     fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
 
-    # 8. Construct System & User Prompts
+    # 8. Construct Prompt Instructions
     system_prompt = (
         f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
-        "Use plain conversational language without headers, defaulting to 2-4 short sentences.\n\n"
-        "Exceptions:\n"
-        "1. Step-by-step requests: a short numbered list is allowed.\n"
-        "2. List/catalog requests: compile a complete bullet-point list using retrieved context.\n"
-        "3. Conversational acknowledgments (e.g. 'thanks', 'cool', 'got it'): respond warmly in 1 short sentence without echoing full fallback text.\n\n"
-        "STRICT RULE: You may ONLY state factual information present in 'Retrieved Context'. "
-        "If factual information requested is not present in Retrieved Context, respond with strictly and exactly this message:\n"
+        "Use plain, clear, conversational language without headers. Default to 2-4 short sentences.\n\n"
+        "Formatting Exceptions:\n"
+        "1. Step-by-step requests: Use a short, clear numbered list.\n"
+        "2. List/Catalog/Summary requests: Compile a clear, comprehensive bullet-point list using all relevant facts in the 'Retrieved Context'.\n"
+        "3. Mid-conversation acknowledgments (e.g., 'thanks', 'got it'): Respond warmly in 1 short sentence without triggering fallback.\n\n"
+        "STRICT CONTEXT RULE: You may ONLY answer using factual information explicitly found in the 'Retrieved Context' below. "
+        "Do not invent facts, assume details, or draw on external knowledge.\n\n"
+        "If the requested information is NOT present in the Retrieved Context, output strictly and exactly this message and nothing else:\n"
         f'"{fallback_text}"\n\n'
-        "Use conversation history to resolve references (like 'it', 'the first one', or 'that price'), "
-        "but never source unverified factual facts from history alone."
+        "Use conversation history only to understand follow-up references (e.g., 'it', 'that price', 'tell me more') — never as an independent source of unverified facts."
     )
 
     llm_messages = [{"role": "system", "content": system_prompt}]
@@ -723,14 +775,14 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
     llm_messages.append({"role": "user", "content": user_prompt})
 
-    # 9. LLM Generation
+    # 9. LLM Answer Generation
     completion = groq_client.chat.completions.create(
         model="openai/gpt-oss-20b",
         messages=llm_messages,
     )
     answer = completion.choices[0].message.content
 
-    # 10. Save Current Turn to DB
+    # 10. Persist Dialogue Turn to DB
     await db.execute(
         text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
         {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
@@ -742,9 +794,9 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     )
     bot_message_id = bot_message_result.fetchone().message_id
 
-    # 11. Store Sources & Commit
+    # 11. Store Citations & Commit
     sources = []
-    # Only store sources if chunks met the similarity threshold and the fallback text was NOT triggered
+    # Store citations only if context was found and fallback wasn't triggered
     if retrieved_chunks and answer.strip() != fallback_text.strip():
         source_rows = [
             {
@@ -769,6 +821,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     await db.commit()
 
     return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
+
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str

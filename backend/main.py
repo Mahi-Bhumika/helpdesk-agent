@@ -499,6 +499,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: List[ChatSource]
 
+
 SIMILARITY_THRESHOLD = 0.35
 ENUMERATION_TOP_K = 25
 ENUMERATION_SIMILARITY_THRESHOLD = 0.15
@@ -506,20 +507,28 @@ ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
 # --- Helper Functions ---
 
-def classify_smalltalk(question: str) -> Optional[str]:
+def classify_smalltalk(question: str, has_history: bool = False) -> Optional[str]:
     """
-    Classifies strict standalone smalltalk.
-    If the question contains follow-up intents (e.g. 'cool how much?'),
-    it returns None so it can be handled by the RAG pipeline.
+    Classifies standalone smalltalk.
+    If history exists, acknowledgments (e.g. 'ok', 'cool') are passed through to the 
+    LLM turn so it can acknowledge in context rather than dropping into a canned fast-path.
     """
     cleaned = question.strip().lower().rstrip("!.,?")
-    greetings = {"hi", "hello", "hey", "good morning", "good evening"}
-    acknowledgments = {"thanks", "thank you", "cool", "ok", "okay", "got it"}
+    greetings = {
+        "hi", "hello", "hey", "heya", "good morning", "good evening", "good afternoon"
+    }
+    acknowledgments = {
+        "thanks", "thank you", "cool", "ok", "okay", "got it", "makes sense", "perfect"
+    }
 
+    # Strict standalone greetings without existing dialogue context
     if cleaned in greetings:
         return "greeting"
-    if cleaned in acknowledgments:
+
+    # Only treat standalone acknowledgments as canned responses if there is NO conversation history
+    if cleaned in acknowledgments and not has_history:
         return "acknowledgment"
+
     return None
 
 
@@ -534,13 +543,15 @@ def _needs_query_rewrite(question: str, history_rows: list) -> bool:
     followup_triggers = [
         "tell me more", "more details", "how much", "price", "cost",
         "and the other", "what about", "the other one", "both", "this",
-        "that", "these", "it", "how much is it", "cool how much"
+        "that", "these", "it", "how much is it", "cool how much", "why",
+        "where", "can I get", "is it available"
     ]
 
     if any(trigger in q_lower for trigger in followup_triggers):
         return True
 
-    return len(q_lower.split()) <= 5
+    # Short queries with history usually imply an ongoing context reference
+    return len(q_lower.split()) <= 6
 
 
 def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
@@ -558,7 +569,7 @@ def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
             "role": "system",
             "content": (
                 "You are a search query reformulation module. Given a conversation history and a follow-up user message, "
-                "rephrase the follow-up message into a complete, standalone search query containing all necessary product "
+                "rephrase the follow-up message into a complete, standalone search query containing all necessary entity "
                 "names and specifics from history. Output ONLY the rephrased search query, nothing else."
             ),
         },
@@ -619,8 +630,22 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         session_id = str(session_result.fetchone().session_id)
 
-    # 3. Smalltalk Check
-    smalltalk_kind = classify_smalltalk(query.question)
+    # 3. Fetch Conversation History (Last 6 Turns)
+    history_result = await db.execute(
+        text("""
+            SELECT sender, content 
+            FROM messages 
+            WHERE session_id = CAST(:session_id AS uuid) 
+            ORDER BY created_at DESC 
+            LIMIT 6
+        """),
+        {"session_id": session_id}
+    )
+    history_rows = list(reversed(history_result.fetchall()))
+
+    # 4. Context-Aware Smalltalk Fast-Path
+    # Passes has_history=bool(history_rows) to prevent dropping active contextual sessions into canned fallbacks.
+    smalltalk_kind = classify_smalltalk(query.question, has_history=bool(history_rows))
     if smalltalk_kind:
         reply = (
             tenant.greeting_message or "Hello! How can I help you today?"
@@ -638,19 +663,6 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
         )
         await db.commit()
         return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
-
-    # 4. Fetch Conversation History (Last 6 Turns)
-    history_result = await db.execute(
-        text("""
-            SELECT sender, content 
-            FROM messages 
-            WHERE session_id = CAST(:session_id AS uuid) 
-            ORDER BY created_at DESC 
-            LIMIT 6
-        """),
-        {"session_id": session_id}
-    )
-    history_rows = list(reversed(history_result.fetchall()))
 
     # 5. Query Rewriting & Embedding Strategy
     is_enum = is_enumeration_query(query.question)
@@ -690,23 +702,17 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # 8. Construct System & User Prompts
     system_prompt = (
-        f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business. "
-        "Use plain conversational language without headers, defaulting to 2-4 short sentences. Two exceptions: "
-        "(1) if the question genuinely asks for a step-by-step process, a short numbered list is fine; "
-        "(2) if the question asks for a list, catalog, or everything available (e.g. 'list all your "
-        "products', 'what do you offer'), use all of the Retrieved Context provided to compile as complete "
-        "a bullet-point list as the context actually supports — don't artificially shorten it to 2-4 "
-        "sentences, and don't invent items the context doesn't mention.\n\n"
-        "STRICT RULE — read carefully: You may ONLY answer using information found in the 'Retrieved Context' "
-        "provided below. This applies to every kind of question, with no exceptions — factual questions, casual "
-        "questions, personal questions, opinion questions, anything. You have no knowledge, opinions, preferences, "
-        "or facts of your own outside that context.\n\n"
-        "If the answer is not clearly present in the Retrieved Context, respond with strictly and exactly this "
-        "message and nothing else, regardless of what was asked:\n"
+        f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
+        "Use plain conversational language without headers, defaulting to 2-4 short sentences.\n\n"
+        "Exceptions:\n"
+        "1. Step-by-step requests: a short numbered list is allowed.\n"
+        "2. List/catalog requests: compile a complete bullet-point list using retrieved context.\n"
+        "3. Conversational acknowledgments (e.g. 'thanks', 'cool', 'got it'): respond warmly in 1 short sentence without echoing full fallback text.\n\n"
+        "STRICT RULE: You may ONLY state factual information present in 'Retrieved Context'. "
+        "If factual information requested is not present in Retrieved Context, respond with strictly and exactly this message:\n"
         f'"{fallback_text}"\n\n'
-        "You may use the conversation history below only to understand what a follow-up question like 'tell me "
-        "more' or 'why' is referring to — never as a source of facts to answer from. If the context doesn't "
-        "contain the answer, history doesn't change that; the fallback still applies."
+        "Use conversation history to resolve references (like 'it', 'the first one', or 'that price'), "
+        "but never source unverified factual facts from history alone."
     )
 
     llm_messages = [{"role": "system", "content": system_prompt}]
@@ -738,7 +744,8 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 
     # 11. Store Sources & Commit
     sources = []
-    if retrieved_chunks:
+    # Only store sources if chunks met the similarity threshold and the fallback text was NOT triggered
+    if retrieved_chunks and answer.strip() != fallback_text.strip():
         source_rows = [
             {
                 "message_id": bot_message_id,
@@ -762,7 +769,6 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
     await db.commit()
 
     return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
-
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str

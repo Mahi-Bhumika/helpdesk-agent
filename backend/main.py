@@ -2,6 +2,8 @@ from fastapi import UploadFile, File, Form
 import tempfile
 import os as os_module
 
+from urllib.parse import urlparse
+
 import time
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +26,8 @@ import asyncio
 from auth import get_current_user, decode_jwt
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
+
+import re
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 

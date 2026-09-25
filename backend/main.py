@@ -1,30 +1,29 @@
-from fastapi import UploadFile, File, Form
-import tempfile
+import asyncio
 import os as os_module
-
+import tempfile
 import time
 
-
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from groq import Groq
 from pydantic import BaseModel, Field
-from typing import Optional
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_db
 
-from extract_text import extract_text
+from auth import decode_jwt, get_current_user
 from chunking import chunk_text, embed_chunks
-
-from groq import Groq
-
+from database import get_db
+from extract_text import extract_text
 from rate_limit import enforce_chat_rate_limit
-
-import asyncio
-
-from auth import get_current_user, decode_jwt
-
-from fastapi import FastAPI, HTTPException, Depends, Header, Query
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
@@ -45,7 +44,7 @@ app.add_middleware(
 
 # --- Pydantic model: defines the "shape" of a Document ---
 class Document(BaseModel):
-    id: Optional[int] = None
+    id: int | None = None
     title: str
     content: str
 
@@ -74,10 +73,10 @@ async def get_document(
 
 
 class DocumentUpdate(BaseModel):
-    file_url: Optional[str] = None
-    format: Optional[str] = None
-    theme: Optional[str] = None
-    status: Optional[str] = None
+    file_url: str | None = None
+    format: str | None = None
+    theme: str | None = None
+    status: str | None = None
 
 
 @app.put("/documents/{document_id}")
@@ -162,10 +161,10 @@ async def delete_document(
 # POST — create a new document
 class DocumentCreate(BaseModel):
     tenant_id: str
-    uploaded_by: Optional[str] = None
-    file_url: Optional[str] = None
-    format: Optional[str] = None
-    theme: Optional[str] = None
+    uploaded_by: str | None = None
+    file_url: str | None = None
+    format: str | None = None
+    theme: str | None = None
 
 
 @app.post("/documents")
@@ -198,12 +197,12 @@ class TenantCreate(BaseModel):
     owner_id: str
     owner_email: str
     company_name: str
-    type_of_business: Optional[str] = None
-    subscription_plan: Optional[str] = None
-    bot_name: Optional[str] = None
-    greeting_message: Optional[str] = None
-    theme_color: Optional[str] = None
-    fallback_message: Optional[str] = None
+    type_of_business: str | None = None
+    subscription_plan: str | None = None
+    bot_name: str | None = None
+    greeting_message: str | None = None
+    theme_color: str | None = None
+    fallback_message: str | None = None
 
 
 @app.get("/tenants/{tenant_id}/widget-config")
@@ -349,8 +348,8 @@ async def upload_document(
 
 
 import re
-
 from urllib.parse import urlparse
+
 
 def extract_origin(url_or_domain: str) -> str:
     """
@@ -384,7 +383,7 @@ def is_smalltalk(question: str) -> bool:
 
 class ChatQuery(BaseModel):
     tenant_id: str
-    session_id: Optional[str] = None
+    session_id: str | None = None
     question: str
     top_k: int = 5
 
@@ -575,7 +574,7 @@ async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = 
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str
-    csat: Optional[int] = Field(None, ge=1, le=5)
+    csat: int | None = Field(None, ge=1, le=5)
 
 
 @app.post("/chat/end")
@@ -787,9 +786,9 @@ async def decline_user(
 
 @app.get("/sessions")
 async def list_sessions(
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    min_csat: Optional[int] = Query(None),
+    start_date: str | None = Query(None),
+    end_date: str | None = Query(None),
+    min_csat: int | None = Query(None),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),

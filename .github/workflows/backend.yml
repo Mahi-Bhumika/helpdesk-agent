@@ -34,8 +34,8 @@ jobs:
           pip install -r requirements.txt
           pip install ruff pytest
 
-      - name: Lint
-        run: ruff check .
+      - name: Lint with Ruff
+        run: ruff check . --ignore B008
 
       - name: Run tests
         run: pytest

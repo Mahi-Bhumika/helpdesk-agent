@@ -114,7 +114,53 @@ async def update_document(
     await db.commit()
     return dict(result.fetchone()._mapping)
 
+#deleting a document
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await db.execute(
+        text("SELECT document_id, tenant_id FROM documents WHERE document_id = :document_id"),
+        {"document_id": document_id}
+    )
+    row = existing.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if str(row.tenant_id) != current_user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
 
+    # Delete child rows first, in dependency order — no ON DELETE CASCADE
+    # confirmed at the schema level, so this is explicit rather than assumed.
+
+    # message_sources references document_chunks.chunk_id — clear those first,
+    # or deleting a chunk that was ever cited in a past chat answer would 409
+    # on the foreign key.
+    await db.execute(
+        text("""
+            DELETE FROM message_sources
+            WHERE chunk_id IN (
+                SELECT chunk_id FROM document_chunks WHERE document_id = :document_id
+            )
+        """),
+        {"document_id": document_id},
+    )
+
+    # Now safe to delete the chunks themselves
+    await db.execute(
+        text("DELETE FROM document_chunks WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+
+    # Finally the document row itself
+    await db.execute(
+        text("DELETE FROM documents WHERE document_id = :document_id"),
+        {"document_id": document_id},
+    )
+
+    await db.commit()
+    return {"status": "deleted", "document_id": document_id}
 
 # POST — create a new document
 class DocumentCreate(BaseModel):

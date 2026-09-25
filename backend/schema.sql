@@ -1,7 +1,6 @@
 create extension if not exists vector;
 create extension if not exists pgcrypto;
 
-
 -- TENANTS
 create table tenants (
     tenant_id uuid primary key default gen_random_uuid(),

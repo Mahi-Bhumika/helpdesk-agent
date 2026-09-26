@@ -13,21 +13,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    services:
-      db:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: helpdesk_agent_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
-
     steps:
       - uses: actions/checkout@v4
 
@@ -49,13 +34,15 @@ jobs:
         working-directory: backend
         env:
           # Loaded from repo secrets — Settings > Secrets and variables > Actions.
-          # See the note below about what TEST_TENANT_ID should actually point at.
+          # DATABASE_URL and SUPABASE_URL point at real Supabase deliberately —
+          # smoke tests only SELECT, never write, and TEST_TENANT_ID's real
+          # embedded documents only exist there, not in a disposable CI database.
           TEST_BASE_URL: http://localhost:8000
           TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
           TEST_ORIGIN: ${{ secrets.TEST_ORIGIN }}
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/helpdesk_agent_test
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           uvicorn main:app --host 0.0.0.0 --port 8000 &
           for i in $(seq 1 20); do
@@ -67,15 +54,3 @@ jobs:
             sleep 1
           done
           pytest tests/ -v
-
-  deploy:
-    # Only runs if `test` succeeded — a failing test means this job never
-    # starts, so Render never gets told to deploy. This is the actual gate.
-    needs: test
-    # Only on a real merge to main, never on a PR (a PR shouldn't deploy
-    # anything — it's just being checked).
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render deploy
-        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"

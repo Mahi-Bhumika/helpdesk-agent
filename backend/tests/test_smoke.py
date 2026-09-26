@@ -20,7 +20,6 @@ Run with:
 """
 
 import os
-
 import httpx
 import pytest
 
@@ -39,10 +38,13 @@ def test_health():
     assert r.status_code == 200
 
 
-def test_tenants_rejects_incomplete_payload():
-    # Contract check, not a real signup — confirms Pydantic validation is wired up.
+def test_tenants_rejects_unauthenticated_request():
+    # /tenants now requires auth (Week 4 Day 4 fix) — an empty, unauthenticated
+    # request is correctly rejected at the auth layer before Pydantic
+    # validation ever runs. This replaces an earlier version of this test
+    # that expected 422, written before that auth requirement existed.
     r = httpx.post(f"{BASE_URL}/tenants", json={}, timeout=10)
-    assert r.status_code == 422
+    assert r.status_code == 401
 
 
 def test_chat_smoke():
@@ -65,7 +67,7 @@ def test_chat_rejects_unknown_tenant():
         "top_k": 3,
     }
     r = httpx.post(f"{BASE_URL}/chat", json=payload, timeout=15)
-    # Should NOT silently succeed with zero chunks and a 200 — pin down what
-    # your actual behavior is (404? 200 with empty chunks?) and assert that,
-    # not this guess.
-    assert r.status_code in (200, 404)
+    # /chat's tenant lookup raises 403 "Tenant not configured for widget
+    # access" when no matching row exists — confirmed from the real
+    # route's code, not a guess this time.
+    assert r.status_code == 403

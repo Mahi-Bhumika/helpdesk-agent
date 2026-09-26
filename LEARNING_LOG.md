@@ -1348,3 +1348,116 @@ Members RLS turned out to be a non-issue on closer inspection — worth
 remembering as its own small lesson: confirm the actual current state
 (`pg_policies`, in this case) before treating a suspected gap as
 confirmed and building a fix for it blind.
+
+
+# Helpdesk Agent — Week 7 Learning Log (Mahi / Docker, Render, CI/CD)
+
+*Containerization + secrets hygiene + a real CI/CD pipeline — Mon through Sun*
+
+---
+
+## Summary
+
+Started the week with a working app that deployed by pushing to Render and hoping for the best. Ended it with: a Dockerfile that builds the exact same environment locally, in CI, and in production; a docker-compose setup for local dev without touching real Supabase data; every secret audited and moved to the right place (or correctly *not* treated as a secret); and a GitHub Actions pipeline that runs real smoke tests against real data and only lets Render deploy once they pass. Getting the CI pipeline green took roughly eight separate real bugs, stacked one after another — each fix exposing the next problem underneath it, which turned out to be the most instructive part of the week.
+
+---
+
+## Day 1 (Mon) — Dockerfile + a real pytest suite
+
+- Wrote `backend/Dockerfile` — base image, dependency layer separated from code layer (so edits don't force a full reinstall), shell-form `CMD` so `${PORT}` actually expands for Render
+- Wrote `backend/tests/test_smoke.py` — real HTTP smoke tests against a running instance (`/health`, `/tenants`, `/chat`), not unit tests with mocks, matching what the plan actually asked for
+- **Decision made explicitly**: smoke tests hit a real tenant with real embedded documents, not fake data — this only works if `TEST_TENANT_ID` points at something genuine, a decision that came back around properly on Saturday
+
+## Day 2 (Tue) — Docker wasn't even installed
+
+- **Bug**: `docker` not recognized at all in PowerShell — turned out Docker Desktop was never installed on this machine. Installed it, which pulled in WSL2 as Docker's actual engine on Windows
+- **Bug**: first real build transferred a 633MB build context and took 85+ seconds — `.dockerignore` wasn't being respected. Root cause: Windows saved it as `.dockerignore.txt` (hidden known-extensions setting), so Docker never saw it as the special ignore file it needed to be
+- **Bug**: `numpy==2.5.2` failed to resolve during `pip install` — `requirements.txt` was frozen from a local venv running a newer Python than the Dockerfile's `python:3.11-slim` base image. Fixed by matching the Dockerfile's Python version exactly to the real local version (3.13), not just picking something recent
+- **Bug**: running `docker run` directly (skipping compose) crashed with `RuntimeError: DATABASE_URL is not set` — expected, since `.env.docker` was deliberately built to hold only `GROQ_API_KEY`, with `DATABASE_URL` meant to come from compose instead
+- **Lesson**: a Dockerfile that "builds successfully" isn't proof of anything if the build context itself is silently wrong — always check what's actually being transferred, not just whether the build finishes
+
+## Day 3 (Wed) — docker-compose, and two folders that look alike but aren't
+
+- Wrote `docker-compose.yml` — FastAPI + `pgvector/pgvector:pg16` as a local Postgres, `backend/schema.sql` auto-mounted so a fresh container gets real tables
+- Identified a real, pre-existing gap: `backend/schema.sql` didn't actually exist anywhere in the repo — the real `CREATE TABLE` statements only ever lived in Supabase's SQL Editor history, a gap flagged all the way back in Week 1's study guide and never closed until now
+- Created `backend/.env.docker` — deliberately holding only `GROQ_API_KEY`, never `DATABASE_URL`, so local dev never accidentally touches production credentials
+- **Bug**: confused `.git` (Git's internal database, never touch) with `.github` (where GitHub Actions workflows must live) — the two folders look almost identical at a glance. `.github/workflows/backend.yml` had to be created fresh; it didn't exist yet
+- **Bug**: `docker-compose.yml` and later `.github/workflows/` got placed *inside* `backend/` instead of the repo root — compose's `./backend` build-context reference and GitHub's workflow-discovery both require these one level up, as siblings of `backend/` and `frontend/`, not nested inside either
+
+## Day 4 (Thu) — Render: buildpacks → Dockerfile
+
+- Switched Render's backend service from its default buildpack runtime to building from `backend/Dockerfile` directly, via the dashboard's Build & Deploy settings — existing environment variables carried over untouched
+- Reconfirmed `CORSMiddleware`'s `allow_origins` needed the real production frontend domain(s), not just localhost — this surfaced again, for real, on Sunday
+
+## Day 5 (Fri) — Secrets audit
+
+- Checked this week's own chat history for an accidentally-pasted real secret — specifically, a real Supabase connection string that had been typed into a `docker run -e DATABASE_URL="..."` command earlier in the week. Confirmed it was never actually leaked (the placeholder text was what got run, not a real value)
+- Ran `git log --all --full-history -- backend/.env` to confirm `.env` itself was never committed at any point — clean
+- Cross-checked Render's real environment variables against the local `.env` to catch gaps before they became a repeat of the JWKS surprise from Tuesday — the pooler `DATABASE_URL` was confirmed correct (port `6543`, not `5432`) without needing to touch it
+- **Lesson reinforced**: a `DATABASE_URL` pointing at real Supabase is always a secret; one pointing at a throwaway local/CI Postgres with made-up credentials is not — hardcoding the latter is actually clearer than hiding it behind a secret for no reason
+
+## Day 6 (Sat) — The actual CI/CD pipeline (and eight real bugs to get there)
+
+- **Real find, not part of the plan**: Render now offers a native Auto-Deploy option, **"After CI Checks Pass"** — replaced the originally-planned manual deploy-hook job (`RENDER_DEPLOY_HOOK_URL` + a `deploy:` job in `backend.yml`) with this instead. Simpler, and puts the actual deploy decision in Render's hands rather than GitHub Actions reaching out to trigger it
+- Deleted the now-unused `RENDER_DEPLOY_HOOK_URL` secret and the `deploy:` job it powered
+- **Bug**: `npm run lint` failed on a new, strict ESLint rule (`react-hooks/set-state-in-effect`) flagging a correct, standard "fetch on mount" `useEffect` pattern as a false positive — resolved with a targeted, commented `eslint-disable-next-line`, not a blanket suppression
+- **Bug**: `ruff check` found the same class of bug as Week 1's duplicate `FastAPI()` app — `main.py`'s imports had been pasted in multiple times across different feature additions (`asyncio`, `FastAPI`, `Depends`, `HTTPException`, `Header`, `Query`, `get_current_user`, `decode_jwt` all imported twice). Fixed automatically via `ruff check . --ignore B008 --fix`
+- Derived real values for `TEST_TENANT_ID` and `TEST_ORIGIN` directly from Supabase — picked a real tenant with actual embedded chunks via a `JOIN`/`COUNT` query, then had to trace `/chat`'s actual `extract_origin()` helper function to get the *exact* string format (`https://mahi-bhumika.github.io`, no trailing slash) the Origin check compares against — guessing the format would have produced a confusing 403 that looked like an auth bug but was really a string mismatch
+- **Bug**: CI crashed with `PyJWKClientError: Invalid JWKS URI scheme ''`, even after setting a `JWKS_URL` secret — turned out `auth.py` never reads a `JWKS_URL` env var at all; it *builds* that URL from `SUPABASE_URL`. Setting the wrong-named secret meant the real variable (`SUPABASE_URL`) was still `None`. Fixed by reading `auth.py`'s actual source instead of guessing from the error text alone
+- **Bug**: same numpy/Python-version mismatch from Tuesday, recurring in a *third* separate environment — GitHub Actions' own `setup-python` step was still pinned to 3.11, unrelated to the Dockerfile's already-fixed version. Fixed by matching all three environments (local venv, Docker, CI) to the same Python version
+- **Bug**: `pytest tests/` failed with "file or directory not found" — `test_smoke.py` had been placed directly in `backend/`, not inside `backend/tests/` as the workflow expected
+- Replaced a blind `sleep 3` before running tests with a real poll loop against `/health`, up to 20 seconds — more robust, and it turned a silent failure into a visible "still waiting" log when something was genuinely wrong later that same day
+- **Real, final bugs — not infrastructure this time, actual application behavior**:
+  - `test_tenants_rejects_incomplete_payload` expected `422`, got `401` — correct, current behavior, since Week 4 added auth to `/tenants`; the test was written against pre-Week-4 assumptions and needed updating, not the code
+  - `test_chat_smoke` / `test_chat_rejects_unknown_tenant` both failed with `relation "tenants" does not exist` — the ephemeral CI Postgres service had no schema loaded, and even fixing that wouldn't help, since the real embedded document data these tests need only exists in production Supabase
+  - **Decision**: rather than trying to seed a disposable CI database with real embeddings on every run, pointed CI's `DATABASE_URL` directly at real Supabase instead, and removed the local ephemeral Postgres service from `backend.yml` entirely — a deliberate tradeoff (CI reads real data) accepted because the smoke tests only ever `SELECT`, never write
+  - Updated the unknown-tenant test to expect the real, confirmed `403` "Tenant not configured for widget access" response, read directly from `main.py`'s actual `/chat` code, instead of guessing between 404/200
+
+## Day 7 (Sun) — Production smoke test, and a second Render service appears
+
+- General smoke test (signup → upload → chat → logout/login → analytics) — the CI pipeline itself, having just been fixed, effectively became this test too, since a real merge now runs the same checks
+- **Widget debugging, in stages**:
+  - Netlify-hosted test page's `/chat` call failed outright — DevTools showed a CORS error and a 404 together, which initially looked like Thursday's `allow_origins` task resurfacing
+  - Checked `main.py`'s actual `CORSMiddleware` config directly rather than guessing — it was already `allow_origins=["*"]`, a deliberate, documented tradeoff from earlier work. CORS was a red herring
+  - The real issue: a **second, new Render service** (`helpdesk-agent-1`) had been created and pointed to from the frontend, separate from the original (`helpdesk-agent-9eu9`) — confirmed independently healthy via a direct `curl /health`, ruling out the backend
+  - Root cause, finally: `widget.js` had the old backend URL **hardcoded as its own constant**, separate from whatever had been edited in `index.html` — editing one file never had a chance to fix the other
+  - Found via `git log --all -p -- backend/main.py | Select-String "widget-config"` — while investigating, also surfaced a duplicate `@app.get("/tenants/{tenant_id}/widget-config")` route definition, the same "pasted twice" pattern as Saturday's import bug, this time in a route rather than an import
+- **Lesson**: a brand-new Render service starts genuinely blank — none of Tuesday–Saturday's Docker settings, env vars, or Auto-Deploy configuration carry over automatically just because it's "the same app." Confirmed this new service had all of it set up properly before moving on, rather than assuming.
+
+---
+
+## Bugs found and fixed this week (the real list)
+
+1. `.dockerignore` silently not applied — saved with a hidden `.txt` extension on Windows
+2. Dockerfile's Python version didn't match the local venv's, breaking `numpy` installation
+3. `docker run` (bypassing compose) crashed on missing `DATABASE_URL` — expected, by design
+4. `.git` vs `.github` confusion — workflows initially had nowhere correct to live
+5. `docker-compose.yml` and `.github/workflows/` misplaced inside `backend/` instead of the repo root
+6. Duplicate imports across `main.py`, accumulated from features added across different weeks without checking existing imports first
+7. `JWKS_URL` set as a secret that the code never actually reads — `auth.py` builds that URL from `SUPABASE_URL` instead
+8. Python version mismatch recurring a third time, now in GitHub Actions' own `setup-python` step
+9. `test_smoke.py` placed outside the `tests/` folder the workflow expected
+10. A blind `sleep 3` in CI wasn't long enough for a real server boot on a slower shared runner
+11. Two test assertions written against outdated (pre-Week-4-auth) expected behavior
+12. CI's ephemeral Postgres had no schema and no real tenant data — architecturally, not just a missing step
+13. A duplicated `/tenants/{tenant_id}/widget-config` route definition in `main.py`
+14. `widget.js` hardcoded an old backend URL independent of `index.html`'s config, surviving a URL change everywhere else
+
+---
+
+## Decisions made deliberately this week
+
+- **Render's native "After CI Checks Pass" over a custom GitHub Actions deploy-hook job** — simpler, and puts the deploy trigger in the tool actually responsible for deploying, rather than GitHub Actions reaching out to poke Render.
+- **CI's `DATABASE_URL` points at real Supabase, not a disposable local Postgres** — accepted specifically because the smoke tests are read-only; seeding a fresh database with real embeddings on every single CI run was judged not worth the complexity for what this project actually needs.
+- **A throwaway local/CI `DATABASE_URL` with made-up credentials is hardcoded, not a GitHub secret** — reserving "secret" for values that protect something real (production Supabase, real API keys) keeps the workflow readable and doesn't dilute what "secret" is supposed to signal.
+- **Every ambiguous error this week got traced to its actual source file before being fixed** — repeatedly, guessing from an error message alone (assuming `JWKS_URL` was the right secret name, assuming CORS was the widget's problem) turned out wrong; reading the real code that raised the error was the only reliable way through.
+
+---
+
+## Where things stand at the end of Week 7
+
+- Full Docker parity: the same Dockerfile builds and runs identically on a local machine, inside `docker-compose` for dev, in GitHub Actions for CI, and on Render for production
+- A real CI/CD pipeline: every push runs a genuine build + smoke test against real backend behavior and real data, and Render only deploys once that passes
+- Secrets fully audited: nothing real committed, nothing real pasted into chat, every environment variable accounted for across four separate places it needs to exist (local `.env`, `.env.docker`, GitHub Actions secrets, Render's environment)
+- The widget, embedded on a real external static page, successfully reaching the live backend — the actual demoable milestone the whole project has been building toward
+- Two Render services currently exist (`helpdesk-agent-9eu9` and `helpdesk-agent-1`); worth a deliberate decision on whether to decommission the old one now that the new one is confirmed live and correctly configured, rather than leaving both running indefinitely

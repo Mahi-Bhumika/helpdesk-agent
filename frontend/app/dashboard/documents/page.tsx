@@ -11,6 +11,11 @@ import GlassCard from "@/components/GlassCard";
 // Declare poll interval constant (e.g., 3 seconds)
 const STATUS_POLL_INTERVAL_MS = 3000;
 
+// Mirrors backend's MAX_CHUNKS_PER_UPLOAD (main.py) — keep these in sync.
+// ~65 chunks at 250 tokens/chunk (40 overlap) works out to roughly
+// 20-25 pages or ~50,000 characters of extractable text.
+const MAX_CHUNKS_PER_UPLOAD = 65;
+
 type Doc = {
     document_id: string;
     file_url: string | null;
@@ -58,6 +63,7 @@ export default function DocumentsPage() {
     const [docs, setDocs] = useState<Doc[]>([]);
     const [loadingDocs, setLoadingDocs] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [chunkLimitError, setChunkLimitError] = useState<string | null>(null);
     const [deletingId, setDeletingId] = useState<string | null>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -131,7 +137,7 @@ export default function DocumentsPage() {
                 const documentId = created.document_id;
 
                 await fetchDocs(true);
-                
+
                 // Start polling silently in background
                 pollRef.current = setInterval(() => {
                     fetchDocs(true);
@@ -157,6 +163,16 @@ export default function DocumentsPage() {
                             // non-JSON fallback
                         }
                     }
+
+                    // The chunk-limit rejection is a distinct, actionable failure
+                    // (split the file up) — surface it as a blocking modal rather
+                    // than folding it into the generic dismissible toast below.
+                    if (uploadRes.status === 422 && message.toLowerCase().includes("chunk limit")) {
+                        setChunkLimitError(message);
+                        setStatus("error");
+                        return;
+                    }
+
                     throw new Error(message);
                 }
 
@@ -182,6 +198,23 @@ export default function DocumentsPage() {
 
     return (
         <>
+            {chunkLimitError && (
+                <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-50">
+                    <GlassCard padding="lg" className="max-w-sm">
+                        <h3 className="text-lg font-semibold text-status-declined mb-2">
+                            Document too large
+                        </h3>
+                        <p className="text-sm text-text-secondary mb-4">{chunkLimitError}</p>
+                        <button
+                            onClick={() => setChunkLimitError(null)}
+                            className="w-full rounded-lg bg-white/[0.1] hover:bg-white/[0.15] px-4 py-2.5 text-sm text-text-primary transition-colors"
+                        >
+                            Got it
+                        </button>
+                    </GlassCard>
+                </div>
+            )}
+
             {errorMessage && (
                 <div className="fixed bottom-4 right-4 max-w-sm rounded-lg bg-status-declinedSoft border border-status-declined/30 backdrop-blur-glass text-text-primary px-4 py-3 shadow-card flex items-start gap-3 z-50">
                     <p className="text-sm">{errorMessage}</p>
@@ -240,6 +273,11 @@ export default function DocumentsPage() {
                             <p className="mt-2 text-sm text-status-declined">Upload failed</p>
                         )}
                     </div>
+
+                    <p className="mt-3 text-xs text-text-muted">
+                        Max ~{MAX_CHUNKS_PER_UPLOAD} chunks per document — roughly 20–25 pages
+                        or 50,000 characters of text. Larger files should be split up before uploading.
+                    </p>
                 </GlassCard>
 
                 <div>

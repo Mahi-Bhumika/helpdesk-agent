@@ -78,6 +78,7 @@ export default function DocumentsPage() {
 
     // Fetch initial document list on mount
     useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-time fetch on mount, not a cascading-render risk
         fetchDocs();
     }, [fetchDocs]);
 

@@ -1,22 +1,10 @@
 name: Backend CI
 
-on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'backend/**'
-      - '.github/workflows/backend.yml'
-  push:
-    branches:
-      - main
-      - add-frontend-ci
-    paths:
-      - 'backend/**'
-      - '.github/workflows/backend.yml'
+o
 
 jobs:
   test:
+  name: Backend tests
     runs-on: ubuntu-latest
 
     defaults:

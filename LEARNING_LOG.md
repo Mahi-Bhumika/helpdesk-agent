@@ -1461,3 +1461,195 @@ Started the week with a working app that deployed by pushing to Render and hopin
 - Secrets fully audited: nothing real committed, nothing real pasted into chat, every environment variable accounted for across four separate places it needs to exist (local `.env`, `.env.docker`, GitHub Actions secrets, Render's environment)
 - The widget, embedded on a real external static page, successfully reaching the live backend — the actual demoable milestone the whole project has been building toward
 - Two Render services currently exist (`helpdesk-agent-9eu9` and `helpdesk-agent-1`); worth a deliberate decision on whether to decommission the old one now that the new one is confirmed live and correctly configured, rather than leaving both running indefinitely
+
+**Week 7, Monday to tuesday session log (bhumika)**
+ 
+- Read GH Actions basics (triggers/jobs/steps), drafted `frontend.yml` for lint+build on PR
+- Decided to switch from direct-push-to-main to a real PR workflow (matches Saturday's planned milestone), messaged Mahi to confirm
+- Chased env var bugs across three separate environments for the same root cause (`supabaseUrl is required`): Vercel Preview scope wasn't checked → fixed; then hit again in GitHub Actions' build step since it doesn't share Vercel's env vars at all → fixed via repo secrets + `env:` block in the workflow
+- Lint pass: fixed 6 unescaped-apostrophe errors, 3 `setState`-in-effect errors (2 were false positives on legit fetch-on-mount patterns, fixed with justified eslint-disable; 1 in `layout.tsx` was a real derived-state bug, fixed by dropping the extra state var). Also fixed an `any` type on `member/page.tsx` and an impure `Date.now()` in render on `dashboard/page.tsx` (switched to `useState` lazy initializer) — both flagged to Mahi first since they were her files
+- Found and fixed a real bug in `sessions/page.tsx`: someone had patched around an ambiguous `/sessions` API response shape (array vs. `{sessions: [...]}`) using `@ts-ignore`/`any` instead of typing it properly — fixed by normalizing the shape once at fetch time. Flagged the underlying contract question to Mahi (unresolved since Week 6)
+- Found the Invites Accept/Decline buttons were never actually wired to `handleDecision` — added the missing `onClick`s
+- Added a delete-document feature: X button + confirm dialog + optimistic UI removal on the frontend (mine), plus a full `DELETE /documents/{id}` endpoint spec/code for Mahi's backend (doesn't exist yet — button will 404 until she adds it)
+- Flagged a duplicate-lockfile issue (root `package-lock.json` + `frontend/`'s) as a latent risk, not urgent
+- Hit and resolved a real merge conflict in `sessions/page.tsx` (near-duplicate CSAT logic between branches)
+- Fixed a corrupted null-byte character in `documents/page.tsx` that was silently breaking Vercel's build — full file overwrite, not a manual edit, since the byte was invisible
+ 
+**Still open, unresolved:**
+- `Frontend CI` mysteriously stopped triggering entirely sometime today, despite the workflow file, path, and content all checking out correctly. Ruled out: disabled workflow, wrong path, missing file, paths-filter mismatch. Was mid-way checking GitHub Actions billing/usage limits and githubstatus.com for an outage when this session paused — **next step is finishing that check**, then deciding whether to merge PR #16 (still blocked anyway on Mahi's delete-document endpoint landing first)
+
+
+# Week 7 — Wednesday to Friday Session Log (Bhumika)
+ 
+*CI/CD setup, Docker debugging, deploy verification, and secrets audit — covers everything worked through in this session.*
+ 
+---
+ 
+## Wednesday — Backend CI + Docker Compose
+ 
+### `backend.yml` — ruff lint fixes
+Three separate `ruff check .` errors, fixed one at a time:
+- **F821** — `Optional` used in `main.py` (`classify_smalltalk`'s return type) but never imported. Fixed with `from typing import Optional`. Flagged to Mahi first since it's her file.
+- **BLE001** — blind `except Exception` around the Groq query-rewrite call. Kept deliberately broad (any rewrite failure should fall back to the raw question) and justified with an inline `# noqa: BLE001` comment instead of narrowing the catch.
+- **I001** — unsorted imports in `test_smoke.py`. Fixed with `ruff check --fix .`.
+ 
+### `backend.yml` — B008 false-positive wave
+A second, much larger batch: **30 B008 errors**, one for every `Depends()`/`File()`/`Form()` default across `auth.py` and `main.py`. Root cause: this is just how FastAPI's dependency injection works — ruff's mutable-default check doesn't know FastAPI's `Depends` pattern is safe. Fixed properly (not a blanket ignore) via `pyproject.toml`:
+```toml
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Form", "fastapi.File", "fastapi.Cookie"]
+```
+This keeps B008 live for a genuine mutable-default bug elsewhere, while clearing all 30 FastAPI false positives at once. Config-only change, no route logic touched.
+ 
+### Docker Compose — real debugging chain
+1. **Docker Desktop not running** — `npipe:////./pipe/dockerDesktopLinuxEngine` error. Fixed by launching Docker Desktop and waiting for it to fully start.
+2. **Real schema bug**: `gen_random_bytes()` (used for `invite_token`) requires the `pgcrypto` extension, which `schema.sql` never created — only `vector` was enabled. Fix: add `create extension if not exists pgcrypto;` alongside the existing `vector` line.
+3. **First fix attempt silently didn't take** — the line was never actually saved to the file, but `docker-compose up` still reported `db-1: Healthy` and the backend started cleanly, because Postgres only runs `schema.sql` against a genuinely empty data directory. The stale volume from the original failed run masked the missing fix completely — nothing in container status, healthcheck, or `/db-check` caught it.
+4. **Real redo**: confirmed the line was actually in the file this time, ran `docker-compose down -v` (confirmed via `docker volume ls` that `helpdesk-agent_pgdata` was actually gone), then `docker-compose up --build` again.
+5. **PowerShell `curl` alias trap**: `curl http://localhost:8000/db-check` triggered an `Invoke-WebRequest` script-parsing prompt instead of running like real curl. Fixed by using `curl.exe` explicitly.
+ 
+### Verified clean
+```
+pg_extension: plpgsql, vector, pgcrypto (3 rows)
+\dt: chat_sessions, document_chunks, documents, end_users,
+     message_sources, messages, tenants, users (8 rows)
+```
+Full Wednesday scope closed. Mahi asked to run the same sequence (`git pull` → `down -v` → `up --build` → both checks) to confirm identical dev environment on her machine.
+ 
+---
+ 
+## Thursday — Vercel Auto-Deploy + CORS Verification
+ 
+### Vercel auto-deploy
+- Initial confusion: recent work had been landing on a `ci-frontend` PR branch, which only produces Preview deployments by design — not a misconfiguration, just nothing had merged to `main` yet.
+- Confirmed readiness before merging PR #16 (delete-document feature): endpoint tested and working, Frontend CI issue from Tuesday resolved, PR showing three green checks.
+- Merged PR #16 → confirmed a real **Production** deployment appeared in Vercel's Deployments tab within seconds → confirmed the live delete-document feature actually worked on the real production URL, not just that the build succeeded.
+ 
+### CORS — investigated and corrected mid-session
+- Initial assumption (mine, incorrectly asserted): a path-aware CORS split existed (wildcard for `/chat`, strict allowlist for dashboard routes), based on Week 3's *originally planned* Option A/B split.
+- Corrected after reading the actual `main.py`: only **one single global `CORSMiddleware` block exists**, `allow_origins=["*"]`, applying to every route — confirmed intentional via an explicit code comment ("Option A — confirmed as the shipped configuration").
+- Real protection for dashboard routes is **JWT auth** (`Depends(get_current_user)`), not CORS — CORS controls which origins can *attempt* a request; auth controls who actually succeeds.
+- `/chat` and `/chat/end` have their own separate, unrelated mechanism: the `extract_origin(tenant.website_domain) != origin` check written directly into the route bodies.
+- **Conclusion: nothing needed for Thursday's CORS check** — the wildcard already covers any production domain automatically. Flagged one minor future consideration to Mahi: `allow_credentials=False` would matter if dashboard auth ever moved from Bearer-token to cookies (it hasn't, so currently a non-issue).
+ 
+---
+ 
+## Friday — Secrets Audit + Env Var Migration
+ 
+### Credential exposure — found and rotated
+- `docker-compose config` output (pasted mid-session for a different purpose) exposed real values: `GROQ_API_KEY`, `SUPABASE_JWT_SECRET`, `SUPABASE_URL`.
+- **Groq key rotated immediately** via Groq's console, updated everywhere it's used.
+- Supabase JWT secret rotation flagged as needing Mahi's input first (used for JWT verification via `PyJWKClient` — rotating without coordination could break active sessions).
+ 
+### Frontend env vars → Vercel
+Moved `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` into Vercel's Environment Variables settings.
+- Hit a real point of confusion: Vercel flagged `NEXT_PUBLIC_API_URL` as set to **Secret** type, which conflicts with the `NEXT_PUBLIC_` prefix (anything with that prefix gets bundled into client-side JS in plain text regardless of the Secret/Config setting — so "Secret" can't actually hide it, it just makes the value unviewable later in the dashboard for no security benefit).
+- Resolved: all three `NEXT_PUBLIC_*` vars set to **Config**, not Secret — matches the existing "public identifier, not a real secret" precedent already established for `tenant_id` back in Week 3.
+- Clarified: Secret vs. Config has zero effect on whether the app actually works — it only controls whether *you* can view the value again later in the dashboard.
+ 
+### `.env.example` — updated
+Backend variables (`DATABASE_URL`, `GROQ_API_KEY`, `SUPABASE_JWT_SECRET`, etc.) added as placeholders alongside the frontend `NEXT_PUBLIC_*` vars.
+ 
+### Git history audit — clean
+```
+git log --all --full-history -- "**/.env"
+```
+Returned empty — no real `.env` file has ever been committed to the repo at any point in history.
+ 
+### Still open
+- **`docker-compose.yml` hardcoding** — the file has real credential values written directly into it (not `${VAR}`-style substitution pulling from `.env`). Flagged to Mahi; not yet confirmed fixed. Worth a follow-up ping rather than assuming it landed.
+- **Supabase JWT secret rotation** — pending Mahi's confirmation it's safe to rotate without breaking active sessions.
+ 
+---
+ 
+## Heading into Saturday
+ 
+Per the Week 7 plan: wire GitHub Actions to gate deployment on CI passing (frontend + backend), then prove the full pipeline end-to-end with a real test PR (PR → checks pass → auto-deploy → verify live). Real gap identified going in: Vercel currently auto-deploys on any push to `main` **independently** of whether `frontend.yml`/`backend.yml` pass — the two systems aren't actually connected yet. Plan is to close that gap via GitHub branch protection (required status checks) rather than fighting Vercel's native Git integration. First step: confirm with Mahi whether PR #16's three green checks were already configured as *required* (blocking) or just informational, before building branch protection from scratch.
+
+# Week 7 — Saturday & Sunday Log (Bhumika)
+
+*Branch protection, required status checks, and independent verification of the live product.*
+
+---
+
+## Saturday — Gating deploys on CI
+
+### The real problem (not the one in the plan)
+The plan said "wire GitHub Actions to auto-deploy frontend to Vercel." That was already a non-task: Vercel's native Git integration had been auto-deploying `main` since Thursday. The actual gap was that CI and deploy were **not connected**. `frontend.yml` and `backend.yml` ran green, but they were informational only, so nothing stopped a red PR from merging and Vercel deploying it.
+
+Confirmed with Mahi before touching settings:
+- PR #16's three green checks were **informational**, not required, so branch protection was genuinely new work.
+- **Render was already gated**: it only deploys when the backend workflow passes. Backend side needed nothing.
+- Vercel was the only ungated side, and it inherits safety automatically once `main` can only receive green code.
+
+### What got built
+- Branch protection rule on `main`: pull request required, required status checks (`Backend tests`, `Frontend lint and build`), branches must be up to date, and **do not allow bypassing** so admins (me included) can't skip it.
+- Gave both jobs explicit `name:` fields so the required check names are readable and stable.
+- Removed the `paths:` filter from the `pull_request` trigger in both workflows (kept on `push`).
+- Merged two versions of `backend.yml` (Mahi's working one and my draft) into one, using hers as the base.
+- Fixed a recurring `I001` unsorted-imports lint error in `tests/test_smoke.py`.
+
+### Proven, not assumed
+- Opened a README-only test PR: both required checks appeared and ran, and the merge button stayed **blocked** until both went green.
+- Tried a direct push to `main` from the terminal. Rejected:
+  ```
+  GH006: Protected branch update failed for refs/heads/main.
+  - Changes must be made through a pull request.
+  - 2 of 2 required status checks are expected.
+  ```
+  Two separate protections, both visibly working.
+
+### Concepts learned
+- **Required vs informational checks.** A green check on a PR means nothing for safety unless the branch rule marks it required. Same visual, completely different guarantee.
+- **`paths:` filters + required checks = permanent hang.** If a workflow only triggers on certain paths and is marked required, any PR that doesn't touch those paths waits forever on "Expected: waiting for status." The fix is dropping the filter on `pull_request`, or requiring a single always-running gate job.
+- **Required check names are the job `name:` (or job ID), not the workflow name.** And they only become searchable in the branch protection box after the check has reported at least once recently, so the workflow PR had to be merged *before* the rule could reference it. Renaming a job after requiring it leaves the old name stuck on "Expected."
+- **CI gates the merge, not the deploy.** Vercel's native deploy doesn't know CI exists. Safety comes from making `main` only accept green code, not from wiring the two systems together.
+- **Two runs on merge are normal.** One was the Vercel/Render deploy, the other was Backend CI re-running via its `push` trigger on `main`.
+- **Merged PR branches don't delete themselves** unless "Automatically delete head branches" is on. Enabled it.
+- **`git reset --hard origin/main`** makes local `main` an exact copy of the remote: the right cleanup after a rejected push left a stray local commit, and destructive if there is anything uncommitted worth keeping.
+
+### Bugs found and fixed
+1. **YAML indentation errors** in both workflows: `name:` sat at the wrong level (directly under `jobs:` in one, level with the job ID in the other), which would have failed parsing.
+2. **`I001` import order** in `test_smoke.py`, the same error fixed on Wednesday, reappearing because Mahi's copy predated that fix. The new lint step caught it, which is the gate doing its job.
+3. **Wrong Python version risk**: my draft used 3.14, which heavy dependencies like `onnxruntime` may not support yet. Matched Mahi's 3.13.
+4. **Unused Postgres service container** in my draft: the smoke tests need `TEST_TENANT_ID`'s real embedded documents, which only exist in real Supabase, so an empty CI database would have failed `/chat`. Dropped it.
+5. **`sleep 3` before smoke tests** replaced with Mahi's `/health` polling loop, since a fixed sleep flakes on slow runners.
+
+### Decisions made deliberately
+- Used Mahi's `backend.yml` as the base and layered mine on top, instead of overwriting a working, already-gating file.
+- Accepted a 2m40s backend check as-is. Most of it is dependency install plus an uncached Docker build; optimizing it is not worth the time this week.
+- Flagged to Mahi that CI smoke tests hit real Supabase and `/chat` logs sessions and messages, so each run probably adds rows.
+
+### What confused me
+- Assumed the Saturday task was to build a deploy workflow. It was actually to gate an existing deploy, which is a different job.
+- Briefly thought I had pushed to `main`. The output showed a brand-new branch being created, so nothing hit `main`.
+
+---
+
+## Sunday — Independent verification
+
+### Context
+Mahi ran the full production smoke test herself and also built the external widget page, which was originally my task. Rather than rebuild it, I verified it independently, so the milestone has two sets of eyes instead of one.
+
+### Verified
+- **Widget on the external page:** loads, `widget-config` returns a clean `200`, dark/grey theme applies, and nothing overlaps the host page. Shadow DOM isolation holding on a real external site, not just the test page.
+- **`cross_tenant_attack_test.py` rerun against the live deployment, both paths:** all pass. First full recheck of the auth and RLS layer since the Week 5-6 changes.
+- **Sticky sidebar:** confirmed it actually landed in code (was an open question from Week 6).
+- **`fallback_message`:** confirmed working end to end.
+- **`docker-compose.yml` hardcoded credentials:** fixed.
+
+### Still open
+- **Supabase JWT secret rotation:** asked Mahi whether rotating is safe without breaking active sessions. Waiting on her answer.
+- **`get_widget_config` has no null check:** a nonexistent `tenant_id` would 500 instead of returning 404. Her file, flagged since Week 6.
+
+### Concepts learned
+- **Verification is a separate job from building.** When someone else builds a thing, "it worked for them" isn't the same claim as "I confirmed it works." Testing it from a clean browser and a different vantage point is what turns it into evidence.
+- **A security test that passes once proves little; a rerun after every big change proves the layer still holds.** The attack script was written in Week 4 and only means something because it keeps getting rerun.
+
+---
+
+## Where things stand
+
+- Full pipeline now: PR → required checks (`Backend tests`, `Frontend lint and build`) → merge → Vercel and Render auto-deploy. Direct pushes to `main` are impossible for everyone.
+- Live dashboard, live backend, widget verified on an external site, attack script clean on the live URLs.
+- Carried forward: JWT secret rotation (pending Mahi), the `get_widget_config` 404 fix, and the smoke-tests-write-real-rows question.

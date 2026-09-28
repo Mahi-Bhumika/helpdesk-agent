@@ -16,7 +16,7 @@
 | supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
-| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-9eu9.onrender.com', port=443): Read timed out. (read timeout=30) |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-1.onrender.com', port=443): Read timed out. (read timeout=30) |
 | — | message_sources | — | **SKIP** | no tenant_id column — needs a manual test via a known message_id once one has leaked; RLS here must be join/EXISTS-based, not a plain compare |
 
 ## Run — 2026-09-03 07:27 UTC
@@ -36,7 +36,7 @@
 | supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
-| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-9eu9.onrender.com', port=443): Read timed out. (read timeout=30) |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-1.onrender.com', port=443): Read timed out. (read timeout=30) |
 | — | message_sources | — | **SKIP** | no tenant_id column — needs a manual test via a known message_id once one has leaked; RLS here must be join/EXISTS-based, not a plain compare |
 
 ## Run — 2026-09-04 03:31 UTC
@@ -56,7 +56,7 @@
 | supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
-| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-9eu9.onrender.com', port=443): Read timed out. (read timeout=30) |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | request error: HTTPSConnectionPool(host='helpdesk-agent-1.onrender.com', port=443): Read timed out. (read timeout=30) |
 | — | message_sources | — | **SKIP** | no tenant_id column — needs a manual test via a known message_id once one has leaked; RLS here must be join/EXISTS-based, not a plain compare |
 
 ## Run — 2026-09-04 03:41 UTC
@@ -136,7 +136,7 @@
 | supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
-| fastapi | chat_sessions+messages | read+write | **CHECK** | timed out twice (60s cold-start attempt + 20s retry): HTTPSConnectionPool(host='helpdesk-agent-9eu9.onrender.com', port=443): Read timed out. (read timeout=20) — backend may be down rather than just cold; check Render directly before assuming this is a cold-start |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | timed out twice (60s cold-start attempt + 20s retry): HTTPSConnectionPool(host='helpdesk-agent-1.onrender.com', port=443): Read timed out. (read timeout=20) — backend may be down rather than just cold; check Render directly before assuming this is a cold-start |
 | — | message_sources | — | **SKIP** | no tenant_id column — needs a manual test via a known message_id once one has leaked; RLS here must be join/EXISTS-based, not a plain compare |
 
 ## Run — 2026-09-06 08:40 UTC

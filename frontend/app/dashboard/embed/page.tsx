@@ -128,7 +128,7 @@ export default function EmbedPage() {
     
     const snippets = generateEmbedSnippets({
     tenantId,
-    apiUrl: "https://helpdesk-agent-9eu9.onrender.com",
+    apiUrl: "https://helpdesk-agent-1.onrender.com",
     name : botName,
     color : themeColor,
     position: "bottom-right",

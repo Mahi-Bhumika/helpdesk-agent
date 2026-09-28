@@ -1,9 +1,10 @@
 import asyncio
+import difflib
 import os as os_module
+import re
 import tempfile
-from urllib.parse import urlparse
-
 import time
+from urllib.parse import urlparse
 
 from fastapi import (
     Depends,
@@ -18,8 +19,6 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
 from pydantic import BaseModel, Field
-from typing import Optional, List
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,15 +27,6 @@ from chunking import chunk_text, embed_chunks
 from database import get_db
 from extract_text import extract_text
 from rate_limit import enforce_chat_rate_limit
-
-import asyncio
-
-from auth import get_current_user, decode_jwt
-
-from fastapi import FastAPI, HTTPException, Depends, Header, Query
-
-import re
-import difflib
 
 groq_client = Groq(api_key=os_module.getenv("GROQ_API_KEY"))
 
@@ -486,7 +476,7 @@ def _fuzzy_match(token: str, candidates: list[str], cutoff: float = 0.72) -> boo
     return bool(difflib.get_close_matches(token, candidates, n=1, cutoff=cutoff))
 
 
-def classify_smalltalk(question: str, has_history: bool = False) -> Optional[tuple[str, str]]:
+def classify_smalltalk(question: str, has_history: bool = False) -> tuple[str, str] | None:
     """
     Classifies standalone smalltalk (greetings, acknowledgments, identity questions).
     Bypasses smalltalk if the message contains > 5 words to prevent capturing contextual queries.

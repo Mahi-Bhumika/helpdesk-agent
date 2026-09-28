@@ -155,6 +155,7 @@ Schema is managed via Supabase's SQL Editor. `CREATE TABLE` statements, RLS poli
 
 ---
 
+
 ## Known limitations
 
 - No rate limiting or abuse protection on `/chat` yet

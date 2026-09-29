@@ -157,12 +157,17 @@ function fetchLiveSettings(config) {
       bubble.setAttribute("aria-expanded", "false");
     }
 
-    function showCsatScreen() {
-      messagesEl.hidden = true;
-      footerEl.style.display = "none";
-      endBtn.style.display = "none";
-      csatView.hidden = false;
-    }
+  function showCsatScreen() {
+    messagesEl.hidden = true;
+    footerEl.style.display = "none";
+    endBtn.style.display = "none";
+    csatView.hidden = false;
+
+    // wait for layout, then scroll so the stars are fully visible
+    requestAnimationFrame(function () {
+      panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
+    });
+  }
 
     function resetWidgetState() {
       sessionId = null;
@@ -396,6 +401,7 @@ function fetchLiveSettings(config) {
       ".HIKA-close:hover{opacity:1;}" +
       ".HIKA-panel-body{flex:1;padding:16px;overflow-y:auto;background:#fafafb;display:flex;flex-direction:column;}" +
       ".HIKA-messages{display:flex;flex-direction:column;gap:12px;flex:1;}" +
+      ".HIKA-messages[hidden]{display:none;}" +
       ".HIKA-msg-wrap{display:flex;flex-direction:column;max-width:82%;}" +
       ".HIKA-msg-wrap-bot{align-self:flex-start;align-items:flex-start;}" +
       ".HIKA-msg-wrap-user{align-self:flex-end;align-items:flex-end;}" +

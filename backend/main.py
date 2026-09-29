@@ -1,11 +1,9 @@
 import asyncio
 import difflib
-import json
 import os as os_module
 import re
 import tempfile
 import time
-from enum import Enum
 from urllib.parse import urlparse
 
 from fastapi import (
@@ -404,15 +402,10 @@ def extract_origin(url_or_domain: str) -> str:
 # with this entire block.
 # ============================================================
 
-import re
-import difflib
-from typing import Optional
 
-from fastapi import HTTPException, Header, Depends
-from pydantic import BaseModel, Field
-from sqlalchemy import text
+from fastapi import Depends
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-
 
 # ============================================================
 # 1. SMALLTALK PATTERNS
@@ -947,7 +940,7 @@ Output ONLY the standalone search query.
         if rewritten:
             return rewritten
 
-    except Exception as e:
+    except Exception as e:   # noqa: BLE001
         print(
             f"[DEBUG] Query rewrite failed: {e}"
         )
@@ -1428,10 +1421,10 @@ async def chat(
         ):
 
             context_parts.append(
-                (
+                
                     f"[SOURCE {index}]\n"
                     f"{chunk['chunk_text']}"
-                )
+                
             )
 
         context = "\n\n---\n\n".join(

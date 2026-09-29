@@ -6,6 +6,12 @@ import tempfile
 import time
 from urllib.parse import urlparse
 
+import json
+import re
+from enum import Enum
+from typing import Any
+
+
 from fastapi import (
     Depends,
     FastAPI,
@@ -396,97 +402,118 @@ def extract_origin(url_or_domain: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-# --- Regex Compiled Patterns ---
+# ============================================================
+# SMALLTALK PATTERNS
+# ============================================================
 
 _GREETING_PATTERN = re.compile(
-    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|good\s*(morning|afternoon|evening)|yo+|sup)\b",
-    re.IGNORECASE
+    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|"
+    r"good\s*(morning|afternoon|evening)|yo+|sup)\b",
+    re.IGNORECASE,
 )
 
 _ACKNOWLEDGMENT_PATTERN = re.compile(
-    r"^\s*(thanks?|thank\s*you+|thx|ty|tysm|ok(ay)?|okie|got\s*it|cool|great|perfect|alright|sounds\s*good|awesome|nice|sure|no\s*problem|np)\b",
-    re.IGNORECASE
+    r"^\s*(thanks?|thank\s*you+|thx|ty|tysm|ok(ay)?|okie|got\s*it|"
+    r"cool|great|perfect|alright|sounds\s*good|awesome|nice|sure|"
+    r"no\s*problem|np)\b",
+    re.IGNORECASE,
 )
 
 _IDENTITY_STATUS_PATTERN = re.compile(
-    r"^\s*(who\s*are\s*you|what\s*are\s*you|are\s*you\s*a\s*bot|how\s*are\s*you|what\s*is\s*your\s*name)\b",
-    re.IGNORECASE
+    r"^\s*(who\s*are\s*you|what\s*are\s*you|are\s*you\s*a\s*bot|"
+    r"how\s*are\s*you|what\s*is\s*your\s*name)\b",
+    re.IGNORECASE,
 )
 
-_ENUMERATION_PATTERNS = re.compile(
-    r"\b("
-    # "list all" / "list of all" / "a list of everything" — the old pattern
-    # required "list" and "all" adjacent, so "a list of all you have" (a very
-    # common real phrasing) never matched. (of\s+)? makes the "of" optional.
-    r"list\s+(of\s+)?(all|everything)|full\s+list|complete\s+list|"
-    r"all\s+(of\s+)?(the\s+|your\s+)?(products|services|items|things)|"
-    r"what\s+(services|products|items)\s+do\s+you\s+(offer|have|sell)|"
-    r"everything\s+you\s+(offer|have|sell)|catalog|"
-    r"show\s+(me\s+)?(all|everything)|"
-    r"what\s+do\s+you\s+(offer|sell|have)|"
-    r"what\s+all\s+(do\s+you\s+)?(have|offer|sell)"
-    r")\b",
-    re.IGNORECASE
-)
 
-_SUMMARY_PATTERNS = re.compile(
-    r"\b("
-    r"summarize|summary|give\s+me\s+a\s+summary|brief\s+overview|recap|tl;?dr"
-    r")\b",
-    re.IGNORECASE
-)
-
-_FOLLOWUP_TRIGGERS = [
-    "tell me more", "more details", "how much", "price", "cost",
-    "and the other", "what about", "the other one", "both", "this",
-    "that", "these", "it", "how much is it", "why", "where",
-    "can i get", "is it available", "how do i", "any other", "other options",
-    "what else", "and?", "and", "anything else", "more", "others"
-]
-
-# --- Typo-tolerant smalltalk word lists (fuzzy fallback below) ---
 _GREETING_WORDS = [
-    "hi", "hii", "hiii", "hey", "heyy", "heya", "hello", "helloo",
-    "howdy", "hola", "yo", "yoo", "sup", "gm", "gmorning",
+    "hi",
+    "hii",
+    "hiii",
+    "hey",
+    "heyy",
+    "heya",
+    "hello",
+    "helloo",
+    "howdy",
+    "hola",
+    "yo",
+    "yoo",
+    "sup",
+    "gm",
+    "gmorning",
 ]
-_GREETING_PHRASES = ["good morning", "good afternoon", "good evening"]
+
+_GREETING_PHRASES = [
+    "good morning",
+    "good afternoon",
+    "good evening",
+]
+
 _ACK_WORDS = [
-    "thanks", "thankyou", "thank you", "thx", "ty", "tysm", "ok", "okay",
-    "okie", "got it", "cool", "great", "perfect", "alright", "sounds good",
-    "awesome", "nice", "sure", "no problem", "np",
+    "thanks",
+    "thankyou",
+    "thank you",
+    "thx",
+    "ty",
+    "tysm",
+    "ok",
+    "okay",
+    "okie",
+    "got it",
+    "cool",
+    "great",
+    "perfect",
+    "alright",
+    "sounds good",
+    "awesome",
+    "nice",
+    "sure",
+    "no problem",
+    "np",
 ]
+
 _IDENTITY_PHRASES = [
-    "who are you", "what are you", "are you a bot", "how are you",
+    "who are you",
+    "what are you",
+    "are you a bot",
+    "how are you",
     "what is your name",
 ]
 
 
-# --- Classification & Intent Helpers ---
-
-def _fuzzy_match(token: str, candidates: list[str], cutoff: float = 0.72) -> bool:
-    """
-    True if `token` is an exact or close (typo-tolerant) match to any
-    candidate phrase, using edit-distance-style similarity rather than a
-    fixed regex, so misspellings like 'heoll' or 'gmm' still resolve to
-    their intended word.
-    """
+def _fuzzy_match(
+    token: str,
+    candidates: list[str],
+    cutoff: float = 0.72,
+) -> bool:
     if not token:
         return False
+
     if token in candidates:
         return True
-    return bool(difflib.get_close_matches(token, candidates, n=1, cutoff=cutoff))
+
+    return bool(
+        difflib.get_close_matches(
+            token,
+            candidates,
+            n=1,
+            cutoff=cutoff,
+        )
+    )
 
 
-def classify_smalltalk(question: str, has_history: bool = False) -> tuple[str, str] | None:
+def classify_smalltalk(
+    question: str,
+    has_history: bool = False,
+) -> tuple[str, str] | None:
     """
-    Classifies standalone smalltalk (greetings, acknowledgments, identity questions).
-    Bypasses smalltalk if the message contains > 5 words to prevent capturing contextual queries.
+    Detects standalone smalltalk.
 
-    Runs the exact regexes first (cheap, precise), then — only for very short
-    inputs (<=3 words), to avoid misclassifying real questions — falls back to
-    fuzzy/typo-tolerant matching against known phrase lists. This is what
-    catches variants the regex can't enumerate, like 'heoll', 'gmm', or 'tanx'.
+    Important:
+    Long questions are never treated as smalltalk.
     """
+
     raw_cleaned = question.strip()
     word_count = len(raw_cleaned.split())
 
@@ -494,398 +521,1605 @@ def classify_smalltalk(question: str, has_history: bool = False) -> tuple[str, s
         return None
 
     if _IDENTITY_STATUS_PATTERN.search(raw_cleaned):
-        return ("identity", "I am an AI support assistant here to help answer your questions based on our knowledge base.")
+        return (
+            "identity",
+            "I am an AI support assistant here to help answer your questions based on our knowledge base.",
+        )
 
     if _GREETING_PATTERN.search(raw_cleaned):
         return ("greeting", "greeting_placeholder")
 
     if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned):
-        return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
+        return (
+            "acknowledgment",
+            "You're welcome! Let me know if there's anything else I can help with.",
+        )
 
     if word_count <= 3:
-        normalized = re.sub(r"[^a-z\s]", "", raw_cleaned.lower()).strip()
-        normalized = re.sub(r"\s+", " ", normalized)
-        first_word = normalized.split()[0] if normalized else ""
+
+        normalized = re.sub(
+            r"[^a-z\s]",
+            "",
+            raw_cleaned.lower(),
+        ).strip()
+
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            normalized,
+        )
 
         if not normalized:
             return None
 
-        if _fuzzy_match(normalized, _IDENTITY_PHRASES, cutoff=0.8):
-            return ("identity", "I am an AI support assistant here to help answer your questions based on our knowledge base.")
+        first_word = normalized.split()[0]
 
-        if _fuzzy_match(first_word, _GREETING_WORDS, cutoff=0.72) or _fuzzy_match(normalized, _GREETING_PHRASES, cutoff=0.72):
+        if _fuzzy_match(
+            normalized,
+            _IDENTITY_PHRASES,
+            cutoff=0.80,
+        ):
+            return (
+                "identity",
+                "I am an AI support assistant here to help answer your questions based on our knowledge base.",
+            )
+
+        if (
+            _fuzzy_match(
+                first_word,
+                _GREETING_WORDS,
+                cutoff=0.72,
+            )
+            or _fuzzy_match(
+                normalized,
+                _GREETING_PHRASES,
+                cutoff=0.72,
+            )
+        ):
             return ("greeting", "greeting_placeholder")
 
-        if _fuzzy_match(normalized, _ACK_WORDS, cutoff=0.75) or _fuzzy_match(first_word, _ACK_WORDS, cutoff=0.75):
-            return ("acknowledgment", "You're welcome! Let me know if there's anything else I can help with.")
+        if (
+            _fuzzy_match(
+                normalized,
+                _ACK_WORDS,
+                cutoff=0.75,
+            )
+            or _fuzzy_match(
+                first_word,
+                _ACK_WORDS,
+                cutoff=0.75,
+            )
+        ):
+            return (
+                "acknowledgment",
+                "You're welcome! Let me know if there's anything else I can help with.",
+            )
 
     return None
 
-def is_enumeration_query(question: str) -> bool:
-    """Detects exhaustive catalog listing requests."""
-    return bool(_ENUMERATION_PATTERNS.search(question))
 
-def is_summary_query(question: str) -> bool:
-    """Detects requests asking for a summary/overview."""
-    return bool(_SUMMARY_PATTERNS.search(question))
+# ============================================================
+# QUERY INTENT
+# ============================================================
 
-
-# Short "is there more?" follow-ups. Distinct from _FOLLOWUP_TRIGGERS (which
-# just decides whether to rewrite the query) — these specifically mean "have
-# you told me everything," which needs a different reply than the generic
-# fallback when the honest answer is "yes, that's the full list."
-_CONTINUATION_TRIGGERS = [
-    "and?", "anything else", "any other", "any others", "others",
-    "other options", "what else", "more options", "any more",
-    "is that all", "is that it", "thats it", "that's it",
-    "what about the rest", "more",
-]
+class QueryIntent(str, Enum):
+    factual = "factual"
+    attribute_lookup = "attribute_lookup"
+    multi_entity_attribute = "multi_entity_attribute"
+    comparison = "comparison"
+    summary = "summary"
+    catalog = "catalog"
+    continuation = "continuation"
+    clarification = "clarification"
 
 
-def is_continuation_query(question: str) -> bool:
-    """Detects a short 'anything else / is that all?' style follow-up."""
-    q = question.strip().lower().rstrip("?!.")
-    if not q or len(q.split()) > 6:
-        return False
-    return q == "and" or any(t.rstrip("?!.") in q for t in _CONTINUATION_TRIGGERS)
+class ResolvedQuery(BaseModel):
+    standalone_query: str
+
+    intent: QueryIntent
+
+    entities: list[str] = Field(
+        default_factory=list
+    )
+
+    attributes: list[str] = Field(
+        default_factory=list
+    )
+
+    comparison_operator: str | None = None
+
+    requires_all_products: bool = False
+
+    requires_previous_context: bool = False
 
 
-# --- Query Reformulation Logic ---
+# ============================================================
+# QUERY RESOLUTION
+# ============================================================
 
-def _needs_query_rewrite(question: str, history_rows: list) -> bool:
+def resolve_query(
+    question: str,
+    history_rows: list,
+) -> ResolvedQuery:
     """
-    Triggers query rewriting if there is conversation history AND either:
-    1. The question is short (<= 6 words).
-    2. The question contains implicit context triggers ('and?', 'what about', 'how much').
+    Converts a conversational question into a standalone
+    retrieval query.
+
+    Example:
+
+        User:
+        "which product has the maximum coverage?"
+
+        User:
+        "what's the price of it?"
+
+    becomes approximately:
+
+        "What is the price of the AetherVane Pro-X?"
     """
-    if not history_rows:
-        return False
 
-    q_lower = question.strip().lower()
+    history_text = "\n".join(
+        [
+            (
+                f"{'User' if getattr(h, 'sender', '') == 'user' else 'Assistant'}: "
+                f"{getattr(h, 'content', '')}"
+            )
+            for h in history_rows[-8:]
+        ]
+    )
 
-    if len(q_lower.split()) <= 6:
-        return True
+    resolver_prompt = """
+You are the query-resolution layer of a RAG customer-support system.
 
-    return any(trigger in q_lower for trigger in _FOLLOWUP_TRIGGERS)
+DO NOT answer the user's question.
 
-def _rewrite_query_for_retrieval(question: str, history_rows: list) -> str:
-    """Rephrases follow-up questions into standalone search queries using Groq."""
-    history_str = "\n".join([
-        f"{'User' if getattr(h, 'sender', '') == 'user' else 'Assistant'}: {getattr(h, 'content', '')}"
-        for h in history_rows[-4:]
-    ])
+Your job is to understand the current user message using
+the conversation history and produce a structured query
+for document retrieval.
 
-    rewrite_prompt = [
+IMPORTANT RULES:
+
+1. Resolve conversational references.
+
+Examples:
+
+"what's its price?"
+"what is the price of it?"
+"what about that one?"
+"tell me more about it"
+"what are their prices?"
+"is it the biggest?"
+"what about the other one?"
+
+Resolve "it", "its", "that", "this", "they", "their",
+"these", "those", and similar references using conversation
+history.
+
+2. Preserve exact product/entity names whenever they are
+available in the conversation.
+
+3. NEVER invent a product or entity.
+
+4. If the user asks about ALL products, set:
+
+requires_all_products = true
+
+5. Comparison questions include:
+
+- most expensive
+- cheapest
+- largest
+- smallest
+- maximum
+- minimum
+- highest
+- lowest
+- biggest
+- best
+- worst
+
+6. For comparison questions, identify the attribute.
+
+Examples:
+
+"most expensive"
+→ attribute: price
+→ comparison_operator: maximum
+
+"cheapest"
+→ attribute: price
+→ comparison_operator: minimum
+
+"maximum area coverage"
+→ attribute: area coverage
+→ comparison_operator: maximum
+
+"lowest power"
+→ attribute: power
+→ comparison_operator: minimum
+
+7. DO NOT invent what "best" means.
+
+If the user says "is it the best product?",
+retrieve information about that product and the available
+product attributes, but do not decide that "best" means
+price, coverage, power, etc. unless the conversation
+explicitly establishes that.
+
+8. Summary questions should identify the entity being
+summarized.
+
+Examples:
+
+"summarize it"
+→ summary of the previously discussed product
+
+"give me a summary of the products"
+→ catalog/summary across products
+
+9. If the question asks for a property of multiple products,
+use:
+
+intent = "multi_entity_attribute"
+
+10. If the user asks for all products, services, offerings,
+catalog items, etc., use:
+
+intent = "catalog"
+
+11. If the user asks whether there is anything else / more
+options / other products, use:
+
+intent = "continuation"
+
+12. standalone_query must be a complete search query containing
+all necessary entity names and requested attributes.
+
+13. The standalone_query should be optimized for retrieval,
+not conversational.
+
+Return ONLY valid JSON matching the requested schema.
+"""
+
+    messages = [
         {
             "role": "system",
-            "content": (
-                "You are a search query reformulation module. Given a conversation history and a follow-up user message, "
-                "rephrase the follow-up message into a complete, standalone search query containing all necessary entity "
-                "names, products, and specifics from history. Preserve the user's original intent — if they are asking "
-                "for a list, a summary/overview, or a price, keep that instruction explicit in the rewritten query "
-                "(e.g. 'pricing for the Pro plan', 'summary of the Starter plan features'). "
-                "Output ONLY the rephrased search query, nothing else."
-            ),
+            "content": resolver_prompt,
         },
         {
             "role": "user",
-            "content": f"Conversation History:\n{history_str}\n\nFollow-up User Message: {question}\n\nStandalone Search Query:",
+            "content": (
+                f"Conversation History:\n"
+                f"{history_text or '(no previous conversation)'}\n\n"
+                f"Current User Question:\n"
+                f"{question}"
+            ),
         },
     ]
 
     try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=rewrite_prompt,
-            temperature=0.0,
-            max_tokens=60,
-        )
-        rewritten = response.choices[0].message.content.strip().strip('"')
-        return rewritten if rewritten else question
-    except Exception as e:  # noqa: BLE001 — any rewrite failure should fall back to the raw question
-        print(f"[DEBUG] Query rewrite failed: {e}")
-    return question
 
+        completion = groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=messages,
+            temperature=0,
+            max_tokens=500,
+            response_format={
+                "type": "json_object",
+            },
+        )
+
+        raw = completion.choices[0].message.content
+
+        parsed = json.loads(raw)
+
+        resolved = ResolvedQuery.model_validate(parsed)
+
+        print(
+            "[DEBUG] Query resolved:",
+            resolved.model_dump(),
+        )
+
+        return resolved
+
+    except Exception as e:
+
+        print(
+            f"[DEBUG] Query resolver failed: {e}"
+        )
+
+        # Safe fallback.
+        return ResolvedQuery(
+            standalone_query=question,
+            intent=QueryIntent.factual,
+        )
+
+
+# ============================================================
+# SIMPLE QUERY DETECTORS
+# ============================================================
+
+_ENUMERATION_PATTERNS = re.compile(
+    r"\b("
+    r"list\s+(of\s+)?(all|everything)|"
+    r"full\s+list|"
+    r"complete\s+list|"
+    r"all\s+(of\s+)?(the\s+|your\s+)?"
+    r"(products|services|items|things)|"
+    r"what\s+(services|products|items)\s+do\s+you\s+"
+    r"(offer|have|sell)|"
+    r"everything\s+you\s+(offer|have|sell)|"
+    r"catalog|"
+    r"show\s+(me\s+)?(all|everything)|"
+    r"what\s+do\s+you\s+(offer|sell|have)|"
+    r"what\s+all\s+(do\s+you\s+)?(have|offer|sell)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_SUMMARY_PATTERNS = re.compile(
+    r"\b("
+    r"summarize|"
+    r"summary|"
+    r"give\s+me\s+a\s+summary|"
+    r"brief\s+overview|"
+    r"recap|"
+    r"tl;?dr"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_CONTINUATION_TRIGGERS = [
+    "and?",
+    "anything else",
+    "any other",
+    "any others",
+    "others",
+    "other options",
+    "what else",
+    "more options",
+    "any more",
+    "is that all",
+    "is that it",
+    "thats it",
+    "that's it",
+    "what about the rest",
+    "more",
+]
+
+
+def is_enumeration_query(
+    question: str,
+) -> bool:
+    return bool(
+        _ENUMERATION_PATTERNS.search(question)
+    )
+
+
+def is_summary_query(
+    question: str,
+) -> bool:
+    return bool(
+        _SUMMARY_PATTERNS.search(question)
+    )
+
+
+def is_continuation_query(
+    question: str,
+) -> bool:
+
+    q = (
+        question
+        .strip()
+        .lower()
+        .rstrip("?!.")
+    )
+
+    if not q:
+        return False
+
+    if len(q.split()) > 6:
+        return False
+
+    if q == "and":
+        return True
+
+    return any(
+        trigger.rstrip("?!.") in q
+        for trigger in _CONTINUATION_TRIGGERS
+    )
+
+
+# ============================================================
+# API MODELS
+# ============================================================
 
 class ChatQuery(BaseModel):
     tenant_id: str
     session_id: str | None = None
     question: str
     top_k: int = 5
- 
- 
+
+
 class ChatSource(BaseModel):
     chunk_id: str
     relevance_score: float
- 
+
+
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
     sources: list[ChatSource]
- 
-# Similarity threshold for retrieval — confirmed at 0.35. Chunks scoring below
-# this (1 - cosine_distance) are treated as not relevant enough to answer from.
-SIMILARITY_THRESHOLD = 0.35
- 
-# Separate, looser settings for detected "list everything" queries — the goal
-# there is coverage, not precision, so cast a much wider net: more chunks,
-# and a much lower bar for "relevant enough to include." Still bounded, not
-# unlimited — 25 chunks is generous for this project's real chunk counts
-# (a few dozen per document) without risking an oversized LLM prompt.
-ENUMERATION_TOP_K = 25
-ENUMERATION_SIMILARITY_THRESHOLD = 0.15
 
-# How far below SIMILARITY_THRESHOLD a single best match is still allowed to
-# fall before we give up entirely on an ordinary (non-enum/summary) query.
-# This exists purely to stop the hard 0.35 cliff from turning a genuinely
-# relevant top hit (e.g. 0.30 similarity) into a false "no context" fallback.
-RELAXED_RETRY_FLOOR = 0.20
- 
 
-# --- Primary Endpoint ---
+# ============================================================
+# RETRIEVAL SETTINGS
+# ============================================================
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(query: ChatQuery, origin: str = Header(None), db: AsyncSession = Depends(get_db)):
-    enforce_chat_rate_limit(query.tenant_id)
-    top_k = min(query.top_k, 10)
+NORMAL_TOP_K = 8
+ENTITY_TOP_K = 15
+COMPARISON_TOP_K = 40
+SUMMARY_TOP_K = 30
+CATALOG_TOP_K = 40
+CONTINUATION_TOP_K = 40
 
-    # 1. Fetch Tenant Configuration
-    tenant_row = await db.execute(
-        text("SELECT website_domain, fallback_message, bot_name, greeting_message FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"),
-        {"tid": query.tenant_id},
+NORMAL_THRESHOLD = 0.25
+ENTITY_THRESHOLD = 0.12
+COMPARISON_THRESHOLD = 0.12
+SUMMARY_THRESHOLD = 0.12
+CATALOG_THRESHOLD = 0.12
+CONTINUATION_THRESHOLD = 0.12
+
+MAX_CONTEXT_CHARS = 24000
+
+
+# ============================================================
+# ENTITY-AWARE VECTOR RETRIEVAL
+# ============================================================
+
+async def retrieve_chunks(
+    db: AsyncSession,
+    tenant_id: str,
+    query_embedding,
+    resolved: ResolvedQuery,
+):
+    """
+    Performs vector retrieval while giving exact entity mentions
+    priority.
+
+    This is important for follow-ups like:
+
+        "what's the price of it?"
+
+because pure vector similarity can otherwise return generic
+price chunks instead of the price chunk belonging to the
+previously discussed product.
+    """
+
+    intent = resolved.intent
+
+    if resolved.requires_all_products:
+        top_k = CATALOG_TOP_K
+        threshold = CATALOG_THRESHOLD
+
+    elif intent == QueryIntent.comparison:
+        top_k = COMPARISON_TOP_K
+        threshold = COMPARISON_THRESHOLD
+
+    elif intent == QueryIntent.summary:
+        top_k = SUMMARY_TOP_K
+        threshold = SUMMARY_THRESHOLD
+
+    elif intent == QueryIntent.catalog:
+        top_k = CATALOG_TOP_K
+        threshold = CATALOG_THRESHOLD
+
+    elif intent == QueryIntent.continuation:
+        top_k = CONTINUATION_TOP_K
+        threshold = CONTINUATION_THRESHOLD
+
+    elif resolved.entities:
+        top_k = ENTITY_TOP_K
+        threshold = ENTITY_THRESHOLD
+
+    else:
+        top_k = NORMAL_TOP_K
+        threshold = NORMAL_THRESHOLD
+
+    top_k = min(
+        top_k,
+        50,
     )
-    tenant = tenant_row.fetchone()
-    if not tenant or not tenant.website_domain:
-        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
-    if not origin or extract_origin(tenant.website_domain) != origin:
-        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
 
-    # 2. Session Initialization / Verification
-    session_id = query.session_id
-    if session_id:
-        existing_session = await db.execute(
-            text("SELECT session_id FROM chat_sessions WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)"),
-            {"sid": session_id, "tid": query.tenant_id}
+    # --------------------------------------------------------
+    # Build entity matching conditions.
+    #
+    # We don't use these as the ONLY retrieval mechanism.
+    # Vector similarity still matters.
+    # --------------------------------------------------------
+
+    entity_conditions = []
+    entity_params = {}
+
+    for i, entity in enumerate(
+        resolved.entities[:8]
+    ):
+
+        param_name = f"entity_{i}"
+
+        entity_conditions.append(
+            f"LOWER(chunk_text) LIKE LOWER(:{param_name})"
         )
+
+        entity_params[param_name] = (
+            f"%{entity}%"
+        )
+
+    if entity_conditions:
+
+        entity_match_sql = (
+            " OR ".join(entity_conditions)
+        )
+
+    else:
+
+        entity_match_sql = "FALSE"
+
+    search_query = text(
+        f"""
+        SELECT
+            chunk_id,
+            chunk_text,
+            chunk_index,
+            document_id,
+
+            embedding <=> :query_embedding AS distance,
+
+            CASE
+                WHEN {entity_match_sql}
+                THEN 0
+                ELSE 1
+            END AS entity_match
+
+        FROM document_chunks
+
+        WHERE tenant_id = CAST(:tenant_id AS uuid)
+
+        ORDER BY
+            entity_match ASC,
+            embedding <=> :query_embedding ASC
+
+        LIMIT :top_k
+        """
+    )
+
+    result = await db.execute(
+        search_query,
+        {
+            "query_embedding": str(
+                query_embedding
+            ),
+            "tenant_id": tenant_id,
+            "top_k": top_k,
+            **entity_params,
+        },
+    )
+
+    rows = result.fetchall()
+
+    retrieved_chunks = []
+
+    for row in rows:
+
+        similarity = (
+            1 - float(row.distance)
+        )
+
+        # Exact entity matches get a more permissive
+        # threshold because lexical entity matching gives
+        # us strong evidence that the chunk is about the
+        # requested product.
+        if row.entity_match == 0:
+
+            keep = similarity >= 0.05
+
+        else:
+
+            keep = similarity >= threshold
+
+        if keep:
+
+            chunk = dict(
+                row._mapping
+            )
+
+            chunk["similarity"] = similarity
+
+            retrieved_chunks.append(
+                chunk
+            )
+
+    # --------------------------------------------------------
+    # Deduplicate
+    # --------------------------------------------------------
+
+    seen = set()
+    deduped = []
+
+    for chunk in retrieved_chunks:
+
+        chunk_id = str(
+            chunk["chunk_id"]
+        )
+
+        if chunk_id in seen:
+            continue
+
+        seen.add(chunk_id)
+
+        deduped.append(chunk)
+
+    retrieved_chunks = deduped
+
+    print(
+        "[DEBUG] Retrieved chunks:",
+        [
+            {
+                "chunk_id": str(
+                    c["chunk_id"]
+                ),
+                "similarity": round(
+                    c["similarity"],
+                    3,
+                ),
+                "entity_match": c.get(
+                    "entity_match"
+                ),
+            }
+            for c in retrieved_chunks
+        ],
+    )
+
+    return retrieved_chunks
+
+
+# ============================================================
+# CONTEXT BUILDER
+# ============================================================
+
+def build_context(
+    retrieved_chunks: list[dict],
+) -> str:
+
+    if not retrieved_chunks:
+        return "NO_RELEVANT_CONTEXT_FOUND"
+
+    context_parts = []
+    total_chars = 0
+
+    for index, chunk in enumerate(
+        retrieved_chunks
+    ):
+
+        block = (
+            f"[Source {index + 1}]\n"
+            f"{chunk['chunk_text']}"
+        )
+
+        if (
+            total_chars
+            + len(block)
+            > MAX_CONTEXT_CHARS
+        ):
+            break
+
+        context_parts.append(
+            block
+        )
+
+        total_chars += len(block)
+
+    if not context_parts:
+        return "NO_RELEVANT_CONTEXT_FOUND"
+
+    return "\n\n---\n\n".join(
+        context_parts
+    )
+
+
+# ============================================================
+# MAIN CHAT ENDPOINT
+# ============================================================
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+)
+async def chat(
+    query: ChatQuery,
+    origin: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+
+    enforce_chat_rate_limit(
+        query.tenant_id
+    )
+
+    # ========================================================
+    # 1. TENANT CONFIGURATION
+    # ========================================================
+
+    tenant_row = await db.execute(
+        text(
+            """
+            SELECT
+                website_domain,
+                fallback_message,
+                bot_name,
+                greeting_message
+            FROM tenants
+            WHERE tenant_id = CAST(:tid AS uuid)
+            """
+        ),
+        {
+            "tid": query.tenant_id
+        },
+    )
+
+    tenant = tenant_row.fetchone()
+
+    if (
+        not tenant
+        or not tenant.website_domain
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Tenant not configured "
+                "for widget access"
+            ),
+        )
+
+    if (
+        not origin
+        or extract_origin(
+            tenant.website_domain
+        ) != origin
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Origin not authorized "
+                "for this tenant"
+            ),
+        )
+
+    # ========================================================
+    # 2. SESSION
+    # ========================================================
+
+    session_id = query.session_id
+
+    if session_id:
+
+        existing_session = await db.execute(
+            text(
+                """
+                SELECT session_id
+                FROM chat_sessions
+                WHERE session_id =
+                    CAST(:sid AS uuid)
+                AND tenant_id =
+                    CAST(:tid AS uuid)
+                """
+            ),
+            {
+                "sid": session_id,
+                "tid": query.tenant_id,
+            },
+        )
+
         if not existing_session.fetchone():
             session_id = None
 
     if not session_id:
+
         session_result = await db.execute(
-            text("""
-                INSERT INTO chat_sessions (tenant_id)
-                VALUES (CAST(:tenant_id AS uuid))
+            text(
+                """
+                INSERT INTO chat_sessions (
+                    tenant_id
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid)
+                )
                 RETURNING session_id
-            """),
-            {"tenant_id": query.tenant_id},
+                """
+            ),
+            {
+                "tenant_id": query.tenant_id
+            },
         )
-        session_id = str(session_result.fetchone().session_id)
 
-    # 3. Fetch Active Conversation History (Last 6 Turns)
+        session_id = str(
+            session_result
+            .fetchone()
+            .session_id
+        )
+
+    # ========================================================
+    # 3. CONVERSATION HISTORY
+    # ========================================================
+
     history_result = await db.execute(
-        text("""
-            SELECT sender, content 
-            FROM messages 
-            WHERE session_id = CAST(:session_id AS uuid) 
-            ORDER BY created_at DESC 
-            LIMIT 6
-        """),
-        {"session_id": session_id}
+        text(
+            """
+            SELECT
+                sender,
+                content
+            FROM messages
+            WHERE session_id =
+                CAST(:session_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT 8
+            """
+        ),
+        {
+            "session_id": session_id
+        },
     )
-    history_rows = list(reversed(history_result.fetchall()))
 
-    # 4. Context-Aware Smalltalk Fast-Path
-    smalltalk_match = classify_smalltalk(query.question, has_history=bool(history_rows))
+    history_rows = list(
+        reversed(
+            history_result.fetchall()
+        )
+    )
+
+    # ========================================================
+    # 4. SMALLTALK
+    # ========================================================
+
+    smalltalk_match = classify_smalltalk(
+        query.question,
+        has_history=bool(
+            history_rows
+        ),
+    )
+
     if smalltalk_match:
-        kind, canned_reply = smalltalk_match
+
+        kind, canned_reply = (
+            smalltalk_match
+        )
+
         if kind == "greeting":
-            reply = tenant.greeting_message or "Hello! How can I help you today?"
+
+            reply = (
+                tenant.greeting_message
+                or "Hello! How can I help you today?"
+            )
+
         else:
+
             reply = canned_reply
 
-        # Persist conversation turn
         await db.execute(
-            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+            text(
+                """
+                INSERT INTO messages (
+                    session_id,
+                    tenant_id,
+                    sender,
+                    content
+                )
+                VALUES (
+                    CAST(:session_id AS uuid),
+                    CAST(:tenant_id AS uuid),
+                    'user',
+                    :content
+                )
+                """
+            ),
+            {
+                "session_id": session_id,
+                "tenant_id": query.tenant_id,
+                "content": query.question,
+            },
         )
+
         await db.execute(
-            text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content)"),
-            {"session_id": session_id, "tenant_id": query.tenant_id, "content": reply},
+            text(
+                """
+                INSERT INTO messages (
+                    session_id,
+                    tenant_id,
+                    sender,
+                    content
+                )
+                VALUES (
+                    CAST(:session_id AS uuid),
+                    CAST(:tenant_id AS uuid),
+                    'bot',
+                    :content
+                )
+                """
+            ),
+            {
+                "session_id": session_id,
+                "tenant_id": query.tenant_id,
+                "content": reply,
+            },
         )
+
         await db.commit()
-        return ChatResponse(session_id=str(session_id), answer=reply, sources=[])
 
-    # 5. Query Classification & Vector Retrieval Config
-    is_enum = is_enumeration_query(query.question)
-    is_summary = is_summary_query(query.question)
-    is_continuation = is_continuation_query(query.question)
+        return ChatResponse(
+            session_id=str(
+                session_id
+            ),
+            answer=reply,
+            sources=[],
+        )
 
-    retrieval_query_text = query.question
+    # ========================================================
+    # 5. RESOLVE QUERY
+    # ========================================================
 
-    # Rewrite runs for ANY short/contextual follow-up, including enumeration
-    # and summary requests — is_enum/is_summary are already computed above
-    # from the ORIGINAL question, so effective_top_k / effective_threshold
-    # below are unaffected either way. Previously this was skipped for
-    # is_enum/is_summary, which meant a follow-up like "summarize that" or
-    # "list pricing for it" never had its pronoun resolved before embedding,
-    # so it had nothing meaningful to match against and fell through to the
-    # fallback message.
-    if _needs_query_rewrite(query.question, history_rows):
-        retrieval_query_text = _rewrite_query_for_retrieval(query.question, history_rows)
-        print(f"[DEBUG] Rewritten query for vector search: '{retrieval_query_text}'")
+    resolved = resolve_query(
+        question=query.question,
+        history_rows=history_rows,
+    )
 
-    query_embedding = embed_chunks([retrieval_query_text])[0]
-    
-    # Expand retrieval scope for enumeration, summary, or "is there more?"
-    # queries — the last one needs the wide net too, since we can only tell
-    # someone "that's everything" in good faith if we actually looked broadly.
-    _wide_scope = is_enum or is_summary or is_continuation
-    effective_top_k = ENUMERATION_TOP_K if _wide_scope else top_k
-    effective_threshold = ENUMERATION_SIMILARITY_THRESHOLD if _wide_scope else SIMILARITY_THRESHOLD
+    # Explicit continuation override.
+    if is_continuation_query(
+        query.question
+    ):
 
-    # 6. Database Vector Search
-    search_query = text("""
-        SELECT chunk_id, chunk_text, chunk_index, document_id, embedding <=> :query_embedding AS distance
-        FROM document_chunks
-        WHERE tenant_id = CAST(:tenant_id AS uuid)
-        ORDER BY embedding <=> :query_embedding
-        LIMIT :top_k
-    """)
-    result = await db.execute(search_query, {
-        "query_embedding": str(query_embedding),
-        "tenant_id": query.tenant_id,
-        "top_k": effective_top_k,
-    })
-    rows = result.fetchall()
+        resolved.intent = (
+            QueryIntent.continuation
+        )
 
-    # 7. Threshold Filtering
-    retrieved_chunks = [
-        dict(row._mapping) for row in rows
-        if (1 - row.distance) >= effective_threshold
+        resolved.requires_all_products = True
+
+    print(
+        "[DEBUG] Final resolved query:",
+        resolved.model_dump(),
+    )
+
+    # ========================================================
+    # 6. EMBEDDING
+    # ========================================================
+
+    retrieval_query_text = (
+        resolved.standalone_query
+    )
+
+    query_embedding = embed_chunks(
+        [retrieval_query_text]
+    )[0]
+
+    # ========================================================
+    # 7. VECTOR + ENTITY RETRIEVAL
+    # ========================================================
+
+    retrieved_chunks = (
+        await retrieve_chunks(
+            db=db,
+            tenant_id=query.tenant_id,
+            query_embedding=query_embedding,
+            resolved=resolved,
+        )
+    )
+
+    # ========================================================
+    # 8. CONTEXT
+    # ========================================================
+
+    context = build_context(
+        retrieved_chunks
+    )
+
+    fallback_text = (
+        tenant.fallback_message
+        or (
+            "Sorry, I don't have an answer "
+            "for that — try rephrasing or "
+            "contact support."
+        )
+    )
+
+    # ========================================================
+    # 9. CHECK "ANYTHING ELSE?"
+    # ========================================================
+
+    no_more_items = False
+
+    if (
+        resolved.intent
+        == QueryIntent.continuation
+        and history_rows
+    ):
+
+        prior_sources_result = (
+            await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT
+                        ms.chunk_id
+                    FROM message_sources ms
+                    JOIN messages m
+                        ON m.message_id =
+                            ms.message_id
+                    WHERE m.session_id =
+                        CAST(
+                            :session_id
+                            AS uuid
+                        )
+                    """
+                ),
+                {
+                    "session_id": session_id
+                },
+            )
+        )
+
+        already_cited_ids = {
+            str(r.chunk_id)
+            for r in (
+                prior_sources_result
+                .fetchall()
+            )
+        }
+
+        retrieved_ids = {
+            str(
+                c["chunk_id"]
+            )
+            for c in retrieved_chunks
+        }
+
+        new_chunk_ids = (
+            retrieved_ids
+            - already_cited_ids
+        )
+
+        no_more_items = (
+            bool(already_cited_ids)
+            and not new_chunk_ids
+        )
+
+    # ========================================================
+    # 10. ANSWER PROMPT
+    # ========================================================
+
+    if no_more_items:
+
+        system_prompt = f"""
+You are {tenant.bot_name or "a helpful AI assistant"},
+a support assistant for this business.
+
+The user is asking whether there are any other products,
+options, or items beyond what was already discussed.
+
+The retrieved context contains no new items beyond the
+products/options already discussed.
+
+Reply with ONE short, warm sentence confirming that those
+are all the currently available options in that category.
+
+Do not apologize.
+
+Do not say you don't understand.
+
+Do not ask the user to rephrase.
+
+Do not invent anything.
+"""
+
+    else:
+
+        if (
+            resolved.intent
+            == QueryIntent.comparison
+        ):
+
+            task_instruction = """
+This is a COMPARISON question.
+
+You MUST compare the relevant products using the requested
+attribute.
+
+For example:
+
+"most expensive"
+→ compare prices
+
+"cheapest"
+→ compare prices
+
+"maximum area coverage"
+→ compare area coverage
+
+"lowest power"
+→ compare power
+
+IMPORTANT:
+
+Do NOT select the product whose chunk has the highest
+vector similarity.
+
+Actually inspect the retrieved product information.
+
+If a comparison cannot be established from the retrieved
+context, use the fallback message.
+"""
+
+        elif (
+            resolved.intent
+            == QueryIntent.summary
+        ):
+
+            task_instruction = """
+This is a SUMMARY request.
+
+Summarize the requested entity or products.
+
+If the user said "summarize it", use the resolved entity
+from the Resolved Query.
+
+Combine information from multiple retrieved chunks when
+necessary.
+
+Do not introduce unrelated products.
+"""
+
+        elif (
+            resolved.intent
+            == QueryIntent.catalog
+            or resolved.requires_all_products
+        ):
+
+            task_instruction = """
+This is a CATALOG / ALL-PRODUCTS request.
+
+Produce a comprehensive bullet-point list of the relevant
+products/items found in Retrieved Context.
+
+Use ALL relevant retrieved information.
+
+Do not invent products.
+
+Do not omit products merely because one product's chunk
+has a lower vector similarity.
+"""
+
+        elif (
+            resolved.intent
+            == QueryIntent.multi_entity_attribute
+        ):
+
+            task_instruction = """
+The user is asking for an attribute across multiple
+products.
+
+Return each relevant product and its corresponding
+attribute.
+
+Do not invent missing values.
+
+If a product does not have the requested attribute in the
+retrieved context, do not make up a value.
+"""
+
+        elif (
+            resolved.intent
+            == QueryIntent.attribute_lookup
+        ):
+
+            task_instruction = """
+This is an ATTRIBUTE LOOKUP.
+
+Answer the requested attribute for the entity identified
+in the Resolved Query.
+
+If the user used "it", "this", "that product", "their",
+etc., use the resolved entity.
+
+Do NOT switch to another product merely because another
+chunk has a higher similarity score.
+"""
+
+        elif (
+            resolved.intent
+            == QueryIntent.clarification
+        ):
+
+            task_instruction = """
+This is a clarification/follow-up request.
+
+Use the Resolved Query to determine what the user is
+referring to.
+
+Answer only from Retrieved Context.
+"""
+
+        else:
+
+            task_instruction = """
+Answer the user's question using the Retrieved Context.
+"""
+
+        system_prompt = f"""
+You are {tenant.bot_name or "a helpful AI assistant"},
+a support assistant for this business.
+
+Use plain, clear, conversational language.
+
+Default to 2-5 short sentences.
+
+{task_instruction}
+
+STRICT CONTEXT RULE:
+
+You may ONLY use factual information explicitly present
+in Retrieved Context.
+
+Conversation history may be used to resolve references
+such as:
+
+- it
+- its
+- they
+- their
+- this
+- that
+- these
+- those
+- the other one
+
+Conversation history is NOT an independent source of facts.
+
+Never invent:
+
+- products
+- prices
+- specifications
+- features
+- measurements
+- availability
+- rankings
+- product comparisons
+
+If the requested information cannot be established from
+Retrieved Context, output EXACTLY:
+
+"{fallback_text}"
+
+and nothing else.
+"""
+
+    # ========================================================
+    # 11. LLM MESSAGES
+    # ========================================================
+
+    llm_messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
     ]
 
-    # Safety-net retry: a hard similarity cliff can wrongly discard a
-    # genuinely relevant single best match (e.g. 0.30 vs a 0.35 bar) for an
-    # ordinary question, producing a false fallback even though the answer
-    # is right there. If nothing cleared the bar, accept the single best
-    # match as long as it's still reasonably close (>= RELAXED_RETRY_FLOOR).
-    # Enumeration/summary queries already use a wide net, so they're excluded.
-    if not retrieved_chunks and rows and not _wide_scope:
-        best = rows[0]
-        if (1 - best.distance) >= RELAXED_RETRY_FLOOR:
-            retrieved_chunks = [dict(best._mapping)]
-            print(f"[DEBUG] Relaxed-threshold retry accepted best match at similarity {1 - best.distance:.3f}")
-
-    context = "\n\n---\n\n".join(chunk["chunk_text"] for chunk in retrieved_chunks) if retrieved_chunks else "NO_RELEVANT_CONTEXT_FOUND"
-    fallback_text = tenant.fallback_message or "Sorry, I don't have an answer for that — try rephrasing or contact support."
-
-    # 7b. "Anything else?" resolution: if this is a continuation query, check
-    # whether the chunks it just retrieved are all chunks that were already
-    # cited earlier in this session. If so, the honest answer isn't "I don't
-    # understand" — it's "that's everything." We only make this call when
-    # something was genuinely already discussed (already_cited_ids non-empty);
-    # otherwise this falls through to the normal path below.
-    no_more_items = False
-    if is_continuation and history_rows:
-        prior_sources_result = await db.execute(
-            text("""
-                SELECT DISTINCT ms.chunk_id
-                FROM message_sources ms
-                JOIN messages m ON m.message_id = ms.message_id
-                WHERE m.session_id = CAST(:session_id AS uuid)
-            """),
-            {"session_id": session_id},
-        )
-        already_cited_ids = {str(r.chunk_id) for r in prior_sources_result.fetchall()}
-        new_chunk_ids = {str(c["chunk_id"]) for c in retrieved_chunks} - already_cited_ids
-        no_more_items = bool(already_cited_ids) and not new_chunk_ids
-
-    # 8. Construct Prompt Instructions
-    if no_more_items:
-        # Dedicated prompt for this branch: confirm, don't apologize. The
-        # STRICT CONTEXT RULE prompt below would otherwise have no way to
-        # distinguish "off-topic" from "you've now heard the full list," and
-        # would output the generic fallback for both.
-        system_prompt = (
-            f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
-            "The user is asking if there's anything else / any other options, as a follow-up to what you already "
-            "told them earlier in this conversation. The Retrieved Context below contains nothing beyond what was "
-            "already discussed — meaning what you already mentioned is the complete offering in that category.\n"
-            "Reply in one short, warm sentence confirming that's everything currently available in that category. "
-            "Do NOT say you don't understand, do NOT ask them to rephrase, and do NOT invent any new items."
-        )
-    else:
-        system_prompt = (
-            f"You are {tenant.bot_name or 'a helpful AI assistant'}, a support assistant for this business.\n"
-            "Use plain, clear, conversational language without headers. Default to 2-4 short sentences.\n\n"
-            "Formatting Exceptions:\n"
-            "1. Step-by-step requests: Use a short, clear numbered list.\n"
-            "2. List/Catalog/Summary requests: Compile a clear, comprehensive bullet-point list using all relevant facts in the 'Retrieved Context'.\n"
-            "3. Mid-conversation acknowledgments (e.g., 'thanks', 'got it'): Respond warmly in 1 short sentence without triggering fallback.\n\n"
-            "STRICT CONTEXT RULE: You may ONLY answer using factual information explicitly found in the 'Retrieved Context' below. "
-            "Do not invent facts, assume details, or draw on external knowledge.\n\n"
-            "If the requested information is NOT present in the Retrieved Context, output strictly and exactly this message and nothing else:\n"
-            f'"{fallback_text}"\n\n'
-            "Use conversation history only to understand follow-up references (e.g., 'it', 'that price', 'tell me more') — never as an independent source of unverified facts."
-        )
-
-    llm_messages = [{"role": "system", "content": system_prompt}]
     for h in history_rows:
-        role = "user" if h.sender == "user" else "assistant"
-        llm_messages.append({"role": role, "content": h.content})
 
-    user_prompt = f"Retrieved Context:\n{context}\n\nUser Question: {query.question}"
-    llm_messages.append({"role": "user", "content": user_prompt})
+        role = (
+            "user"
+            if h.sender == "user"
+            else "assistant"
+        )
 
-    # 9. LLM Answer Generation
-    completion = groq_client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=llm_messages,
+        llm_messages.append(
+            {
+                "role": role,
+                "content": h.content,
+            }
+        )
+
+    user_prompt = f"""
+Resolved Query:
+{resolved.model_dump_json()}
+
+Retrieved Context:
+{context}
+
+Current User Question:
+{query.question}
+"""
+
+    llm_messages.append(
+        {
+            "role": "user",
+            "content": user_prompt,
+        }
     )
-    answer = completion.choices[0].message.content
 
-    # 10. Persist Dialogue Turn to DB
+    # ========================================================
+    # 12. ANSWER GENERATION
+    # ========================================================
+
+    completion = (
+        groq_client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=llm_messages,
+            temperature=0,
+        )
+    )
+
+    answer = (
+        completion
+        .choices[0]
+        .message
+        .content
+        .strip()
+    )
+
+    # ========================================================
+    # 13. SAVE USER MESSAGE
+    # ========================================================
+
     await db.execute(
-        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'user', :content)"),
-        {"session_id": session_id, "tenant_id": query.tenant_id, "content": query.question},
+        text(
+            """
+            INSERT INTO messages (
+                session_id,
+                tenant_id,
+                sender,
+                content
+            )
+            VALUES (
+                CAST(:session_id AS uuid),
+                CAST(:tenant_id AS uuid),
+                'user',
+                :content
+            )
+            """
+        ),
+        {
+            "session_id": session_id,
+            "tenant_id": query.tenant_id,
+            "content": query.question,
+        },
     )
+
+    # ========================================================
+    # 14. SAVE BOT MESSAGE
+    # ========================================================
 
     bot_message_result = await db.execute(
-        text("INSERT INTO messages (session_id, tenant_id, sender, content) VALUES (CAST(:session_id AS uuid), CAST(:tenant_id AS uuid), 'bot', :content) RETURNING message_id"),
-        {"session_id": session_id, "tenant_id": query.tenant_id, "content": answer},
+        text(
+            """
+            INSERT INTO messages (
+                session_id,
+                tenant_id,
+                sender,
+                content
+            )
+            VALUES (
+                CAST(:session_id AS uuid),
+                CAST(:tenant_id AS uuid),
+                'bot',
+                :content
+            )
+            RETURNING message_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "tenant_id": query.tenant_id,
+            "content": answer,
+        },
     )
-    bot_message_id = bot_message_result.fetchone().message_id
 
-    # 11. Store Citations & Commit
+    bot_message_id = (
+        bot_message_result
+        .fetchone()
+        .message_id
+    )
+
+    # ========================================================
+    # 15. SAVE SOURCES
+    # ========================================================
+
     sources = []
-    # Store citations only if context was found, fallback wasn't triggered,
-    # and this isn't the "no_more_items" branch (those chunks were already
-    # cited against an earlier message in this session — no need to duplicate).
-    if retrieved_chunks and answer.strip() != fallback_text.strip() and not no_more_items:
-        source_rows = [
-            {
-                "message_id": bot_message_id,
-                "chunk_id": chunk["chunk_id"],
-                "relevance_score": 1 - chunk["distance"],
-            }
-            for chunk in retrieved_chunks
-        ]
+
+    if (
+        retrieved_chunks
+        and answer.strip()
+        != fallback_text.strip()
+        and not no_more_items
+    ):
+
+        source_rows = []
+
+        for chunk in retrieved_chunks:
+
+            source_rows.append(
+                {
+                    "message_id":
+                        bot_message_id,
+
+                    "chunk_id":
+                        chunk["chunk_id"],
+
+                    "relevance_score":
+                        chunk["similarity"],
+                }
+            )
+
         await db.execute(
-            text("""
-                INSERT INTO message_sources (message_id, chunk_id, relevance_score)
-                VALUES (:message_id, :chunk_id, :relevance_score)
-            """),
+            text(
+                """
+                INSERT INTO message_sources (
+                    message_id,
+                    chunk_id,
+                    relevance_score
+                )
+                VALUES (
+                    :message_id,
+                    :chunk_id,
+                    :relevance_score
+                )
+                """
+            ),
             source_rows,
         )
+
         sources = [
-            ChatSource(chunk_id=str(r["chunk_id"]), relevance_score=r["relevance_score"])
-            for r in source_rows
+            ChatSource(
+                chunk_id=str(
+                    row["chunk_id"]
+                ),
+                relevance_score=float(
+                    row["relevance_score"]
+                ),
+            )
+            for row in source_rows
         ]
+
+    # ========================================================
+    # 16. COMMIT
+    # ========================================================
 
     await db.commit()
 
-    return ChatResponse(session_id=str(session_id), answer=answer, sources=sources)
+    return ChatResponse(
+        session_id=str(
+            session_id
+        ),
+        answer=answer,
+        sources=sources,
+    )
 
+
+# ============================================================
+# END CHAT
+# ============================================================
+
+class EndChatRequest(BaseModel):
+    session_id: str
+    tenant_id: str
+    csat: int | None = Field(
+        None,
+        ge=1,
+        le=5,
+    )
+
+
+@app.post("/chat/end")
+async def end_chat(
+    payload: EndChatRequest,
+    origin: str = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+
+    tenant_row = await db.execute(
+        text(
+            """
+            SELECT website_domain
+            FROM tenants
+            WHERE tenant_id =
+                CAST(:tid AS uuid)
+            """
+        ),
+        {
+            "tid": payload.tenant_id
+        },
+    )
+
+    tenant = tenant_row.fetchone()
+
+    if (
+        not tenant
+        or not tenant.website_domain
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Tenant not configured "
+                "for widget access"
+            ),
+        )
+
+    if (
+        not origin
+        or extract_origin(
+            tenant.website_domain
+        ) != origin
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Origin not authorized "
+                "for this tenant"
+            ),
+        )
+
+    session_result = await db.execute(
+        text(
+            """
+            SELECT session_id
+            FROM chat_sessions
+            WHERE session_id =
+                CAST(:sid AS uuid)
+            AND tenant_id =
+                CAST(:tid AS uuid)
+            """
+        ),
+        {
+            "sid": payload.session_id,
+            "tid": payload.tenant_id,
+        },
+    )
+
+    if not session_result.fetchone():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found",
+        )
+
+    await db.execute(
+        text(
+            """
+            UPDATE chat_sessions
+            SET
+                status = 'completed',
+                customer_satisfaction =
+                    COALESCE(
+                        :csat,
+                        customer_satisfaction
+                    ),
+                end_datetime = NOW()
+            WHERE session_id =
+                CAST(:sid AS uuid)
+            AND tenant_id =
+                CAST(:tid AS uuid)
+            """
+        ),
+        {
+            "sid": payload.session_id,
+            "tid": payload.tenant_id,
+            "csat": payload.csat,
+        },
+    )
+
+    await db.commit()
+
+    return {
+        "status": "success",
+        "message": "Chat session ended",
+    }
 class EndChatRequest(BaseModel):
     session_id: str
     tenant_id: str

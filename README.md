@@ -1,18 +1,66 @@
-# Helpdesk Agent (Bot AI)
+# HIKA — Helpdesk Intelligence & Knowledge Automation
 
-A multi-tenant SaaS platform where companies sign up, upload their own documents/FAQs, and get an AI-powered chat widget they can embed on their own website. The widget answers visitor questions using **only that company's own uploaded content** — with strict per-tenant data isolation enforced at the database level.
+A multi-tenant SaaS platform that lets any business upload their own documents/FAQs and embed an AI-powered support chatbot on their website — answering visitor questions using **only that business's own content**, with strict per-tenant data isolation enforced at the database level.
 
-Built as a two-person college project. Backend/RLS/Auth by Person A, frontend/end-to-end wiring/QA by Person B (Bhumika).
+Built as a two-person, seven-week project: a Next.js dashboard, a FastAPI + RAG backend, a standalone embeddable widget, and a containerized CI/CD pipeline taking it from "runs on my machine" to a real, gated, auto-deploying production system.
 
 ---
 
-## What it does
+## Table of contents
 
-- A company signs up, configures a bot (name, greeting, theme), and uploads PDFs/FAQs
-- The company pastes a small embed script into their own website
-- Visitors on that website chat with the bot; the bot answers using Retrieval-Augmented Generation (RAG) over that company's documents only
-- The company's dashboard shows chat history, analytics, and lets them manage documents and teammates
-- Teammates join via an invite link and require **owner approval** before getting access
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+- [Environment variables](#environment-variables)
+- [Database schema](#database-schema)
+- [API reference](#api-reference)
+- [Security model](#security-model)
+- [The RAG pipeline](#the-rag-pipeline)
+- [Embedding the widget](#embedding-the-widget)
+- [CI/CD pipeline](#cicd-pipeline)
+- [Deployment](#deployment)
+- [Known limitations / roadmap](#known-limitations--roadmap)
+- [Contributors](#contributors)
+
+---
+
+## Overview
+
+Two audiences use the system:
+
+- **Tenant staff** (owners + invited members) — sign up, upload documents, configure the bot's name/greeting/theme, view analytics and chat transcripts, manage their team, via a dashboard.
+- **End visitors** — the public, who chat with a bubble widget embedded on the tenant's own website. The bot answers strictly from that tenant's uploaded documents, or says it doesn't know — it never blends in outside knowledge or another tenant's data.
+
+The core technical bet is **Retrieval-Augmented Generation (RAG)**: uploaded PDFs are parsed, chunked, and embedded into vectors; a visitor's question is embedded the same way and matched against those vectors; the closest matching chunks are handed to an LLM along with a system prompt that keeps its answer grounded in what was actually retrieved.
+
+---
+
+## Architecture
+
+```
+┌─────────────────┐         ┌──────────────────┐         ┌────────────────────┐
+│  Next.js         │  HTTPS  │  FastAPI          │  asyncpg │  Supabase Postgres │
+│  Dashboard        │───────▶│  (Docker, Render) │────────▶│  + pgvector         │
+│  (Vercel)         │  JWT    │                   │          │  + Row-Level        │
+└─────────────────┘         │  /tenants          │          │    Security         │
+                              │  /documents        │          └────────────────────┘
+┌─────────────────┐         │  /kb/upload        │
+│  widget.js        │  HTTPS  │  /chat             │
+│  (embedded on any │────────▶│  /chat/end         │───────▶  Groq (LLM inference)
+│  tenant website)  │  Origin │  /sessions         │
+└─────────────────┘  check   │  /admin/*          │
+                              │  /invite/accept     │
+                              └──────────────────┘
+```
+
+Two genuinely separate traffic paths hit the backend, each with its own protection model:
+
+1. **Dashboard → FastAPI**: authenticated tenant staff, protected by JWT verification (`Authorization: Bearer <token>`) checked against Supabase's public signing keys.
+2. **Widget → FastAPI**: anonymous end visitors, no login. Protected instead by a per-tenant `website_domain` check against the request's `Origin` header, plus rate limiting.
+
+Both paths converge on the same tenant-scoped Postgres tables, with Row-Level Security enforcing isolation as a second, independent layer beneath the application code.
 
 ---
 
@@ -20,67 +68,17 @@ Built as a two-person college project. Backend/RLS/Auth by Person A, frontend/en
 
 | Layer | Technology |
 |---|---|
-| Backend | Python, FastAPI, SQLAlchemy (async) + asyncpg |
-| Database | Supabase (managed Postgres) + `pgvector` extension |
-| Auth | Supabase Auth (JWT-based sessions) |
-| Embeddings | `onnxruntime` running a pre-converted `all-MiniLM-L6-v2` (384-dim), batched inference |
-| PDF parsing | `pdfplumber` |
-| LLM generation | Groq (`openai/gpt-oss-20b`), OpenAI's open-weight model served on Groq's inference hardware |
-| Frontend | Next.js (App Router), TypeScript, Tailwind CSS |
-| File upload | `react-dropzone` |
-| Backend hosting | Render |
-| Frontend hosting | Vercel |
-| Security | Postgres Row-Level Security (RLS), tenant isolation via `tenant_id` |
-
----
-
-## Architecture
-
-**Ingestion (`/kb/upload`)**
-```
-PDF upload → pdfplumber (extract text) → tokenizer-based chunking
-  (250 tokens, 40 overlap, short trailing chunks merged)
-  → ONNX/MiniLM embeddings (384-dim, batched, L2-normalized)
-  → stored in document_chunks (pgvector), tenant_id attached
-```
-
-**Retrieval + generation (`/chat`)**
-```
-User question → embedded with the same model/pooling as ingestion
-  → pgvector similarity search (Euclidean `<->`, tenant-scoped)
-  → top_k chunks assembled into context
-  → sent to Groq with a grounding system prompt
-  → answer returned + session/messages/message_sources logged
-```
-
-**Multi-tenancy**
-Every tenant-scoped table (`documents`, `document_chunks`, `chat_sessions`, `messages`) carries a denormalized `tenant_id` column — duplicated rather than derived via joins, so Row-Level Security policies can filter with a simple `WHERE tenant_id = ...` instead of a multi-table join. This is a deliberate tradeoff: slightly more write complexity in exchange for simpler, faster, harder-to-get-wrong security policies.
-
----
-
-## Database schema
-
-| Table | Purpose |
-|---|---|
-| `tenants` | One row per company. Bot config (name, greeting, theme), permanent `invite_token` |
-| `users` | Individual logins. `role` (owner/member), `status` (pending/active), tenant link |
-| `documents` | Uploaded source files, lifecycle status (`uploaded` → `ready`) |
-| `document_chunks` | Chunked + embedded text (`vector(384)`), tenant-scoped |
-| `end_users` | Anonymous-by-default website visitors (nullable identity) |
-| `chat_sessions` | One row per widget conversation |
-| `messages` | Individual messages within a session |
-| `message_sources` | Which chunks contributed to a given bot answer, with a relevance score |
-
-All primary keys are UUIDs (not auto-incrementing integers) so IDs can't be probed/guessed.
-
----
-
-## Security model
-
-- **Row-Level Security (RLS)** is enabled on every tenant-scoped table. Policies check both `tenant_id` match *and* `users.status = 'active'`, so a pending (unapproved) user cannot read tenant data even though their JWT is valid and correctly tenant-linked.
-- **Invite flow**: a single permanent, unguessable link per tenant (`tenants.invite_token`). Anyone with the link can request to join, but lands as `status = 'pending'` and sees a waiting screen until the tenant owner explicitly approves or declines them from the dashboard.
-- **Tenant isolation is enforced at the database layer**, not just in application code — proven via a deliberate "attack script" that attempts cross-tenant reads and confirms they fail.
-- Real secrets (`DATABASE_URL`, `GROQ_API_KEY`, Supabase keys) live only in `.env` (gitignored) locally and each platform's own environment variable settings in production — never committed.
+| Frontend | Next.js (App Router), TypeScript, Tailwind CSS, Recharts |
+| Backend | FastAPI, SQLAlchemy (async) + asyncpg, Pydantic |
+| Database | Supabase (Postgres 16 + `pgvector`), Row-Level Security |
+| Auth | Supabase Auth — JWT, ES256 / JWKS (asymmetric, not shared-secret) |
+| Embeddings | `onnxruntime` + `Xenova/all-MiniLM-L6-v2` (384-dim, local, free) |
+| LLM | Groq (`openai/gpt-oss-20b`) |
+| PDF parsing | `pdfplumber` (primary), `PyPDF2` (fallback) |
+| Containerization | Docker, `docker-compose` (local dev parity) |
+| CI/CD | GitHub Actions, branch protection with required status checks |
+| Hosting | Render (backend, Docker), Vercel (frontend) |
+| Widget hosting | Vercel `public/` + GitHub Pages (test/demo) |
 
 ---
 
@@ -88,76 +86,224 @@ All primary keys are UUIDs (not auto-incrementing integers) so IDs can't be prob
 
 ```
 helpdesk-agent/
+├── .github/
+│   └── workflows/
+│       ├── backend.yml        # lint (ruff) + smoke tests + Docker build sanity check
+│       └── frontend.yml       # lint (eslint) + build
 ├── backend/
-│   ├── main.py            # FastAPI routes: /tenants, /documents, /kb/upload, /chat, /admin/*
-│   ├── database.py        # Async SQLAlchemy engine + get_db() dependency
-│   ├── extract_text.py    # PDF → raw text
-│   ├── chunking.py        # chunk_text(), embed_chunks() (ONNX/MiniLM, batched)
+│   ├── main.py                 # all FastAPI routes
+│   ├── auth.py                 # decode_jwt / get_current_user, JWKS verification
+│   ├── database.py             # async engine + get_db() dependency
+│   ├── extract_text.py         # PDF → raw text
+│   ├── chunking.py              # text → token-exact chunks → ONNX embeddings
+│   ├── rate_limit.py            # sliding-window rate limiter
+│   ├── schema.sql               # full CREATE TABLE / index / constraint set
+│   ├── Dockerfile
+│   ├── .dockerignore
 │   ├── requirements.txt
-│   └── .env               # DATABASE_URL, GROQ_API_KEY (gitignored)
+│   ├── requirements-dev.txt
+│   └── tests/
+│       └── test_smoke.py        # /health, /tenants, /chat smoke tests
 ├── frontend/
 │   ├── app/
-│   │   ├── signup/, login/, pending-approval/
-│   │   └── dashboard/     # analytics, documents, settings, embed, admin/invites
+│   │   ├── (public)/            # landing page, login, signup, pending, declined
+│   │   └── dashboard/           # analytics, documents, sessions, settings, invites, member
 │   ├── lib/
 │   │   ├── supabase.ts
-│   │   └── auth-context.tsx
-│   └── .env.local
-├── .env.example
-├── .gitignore
+│   │   ├── auth-context.tsx
+│   │   └── api.ts               # authedFetch() helper
+│   ├── components/
+│   └── public/
+│       └── widget.js            # standalone embeddable widget, Shadow DOM isolated
+├── docker-compose.yml            # FastAPI + local pgvector-enabled Postgres
 └── README.md
 ```
 
 ---
 
-## Local setup
+## Getting started
 
-**Backend**
+### Prerequisites
+
+- Node.js + npm
+- Python 3.13
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with WSL2 on Windows)
+- A Supabase project (Postgres + Auth)
+- A free [Groq](https://console.groq.com/) API key
+
+### Local setup
+
 ```bash
-cd backend
-python -m venv venv
-venv\Scripts\activate        # Windows; use `source venv/bin/activate` on Mac/Linux
-python -m pip install -r requirements.txt
-# create .env with DATABASE_URL and GROQ_API_KEY (see .env.example)
-uvicorn main:app --reload
+git clone <repo-url>
+cd helpdesk-agent
 ```
-Visit `http://localhost:8000/docs` for the interactive API explorer.
 
-**Frontend**
+**Backend — via Docker Compose (recommended, matches CI/production):**
+
+```bash
+# backend/.env.docker — local-only, gitignored
+echo "GROQ_API_KEY=your_key_here" > backend/.env.docker
+
+docker-compose up --build
+```
+
+This starts FastAPI on `:8000` and a local `pgvector`-enabled Postgres on `:5432`, seeded automatically from `backend/schema.sql`. `DATABASE_URL` for this environment is set inside `docker-compose.yml` itself — it points at the local container, **never** at production Supabase.
+
+Verify:
+```bash
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+**Frontend:**
+
 ```bash
 cd frontend
 npm install
-# create .env.local with NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY
 npm run dev
 ```
 
-**Database**
-Schema is managed via Supabase's SQL Editor. `CREATE TABLE` statements, RLS policies, and any `ALTER TABLE` fixes should be kept in `backend/schema.sql` for version control (not just left in Supabase's dashboard history).
+Create `frontend/.env.local` with the variables listed below, then visit `http://localhost:3000`.
 
 ---
 
-## Status by week
+## Environment variables
 
-- **Week 1** — FastAPI + Postgres foundations. Schema designed and deployed (8 tables), first live endpoint (`POST /tenants`), backend deployed to Render.
-- **Week 2** — Full RAG pipeline: PDF parsing, chunking, embeddings (migrated from `sentence-transformers`/`torch` to `onnxruntime` to fit Render's free-tier memory limit), pgvector retrieval, Groq generation. `/kb/upload` hardened against event-loop blocking and batch-size memory issues.
-- **Week 3** — Full Next.js dashboard: Supabase auth, protected routes, document upload UI, analytics, bot settings, embed script generator. `/chat` upgraded to persist real session/message/source data. First RLS policies written (`chat_sessions`, `messages`).
-- **Week 4 (in progress)** — Full RLS hardening across all remaining tables (`documents`, `document_chunks`, `tenants`, `users`), each requiring both tenant match and active-user status. Building the owner-approval invite flow (pending → active) that replaces the originally-planned Stripe billing integration.
-- **Week 5 (planned)** — Dockerize the backend, `docker-compose` for local dev parity, GitHub Actions CI/CD auto-deploying to Render and Vercel on merge to `main`.
+Four separate places these need to exist, and they are **not** all the same values:
 
----
+| Variable | Where it's used | Notes |
+|---|---|---|
+| `DATABASE_URL` | Backend | Supabase **pooler** connection string in prod/CI (port `6543`), local Postgres container in `docker-compose` |
+| `GROQ_API_KEY` | Backend | Real secret everywhere |
+| `SUPABASE_URL` | Backend | Bare project URL (`https://xxxx.supabase.co`) — `auth.py` derives the JWKS endpoint from this itself |
+| `NEXT_PUBLIC_SUPABASE_URL` | Frontend | Same Supabase project, public by design |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Frontend | Public anon key — protected by RLS, not secrecy |
+| `NEXT_PUBLIC_API_URL` | Frontend | The backend's base URL |
 
-## Deliberate scope decisions
-
-- **Billing/subscriptions**: dropped from scope. Originally planned as a Week 4 Stripe integration; judged not meaningful for a college demo with no real tenants or payments. Unused placeholder columns remain on `tenants` from Week 1 but aren't wired up.
-- **Owner approval for invites**: originally skipped in Week 1 (judged disproportionate given the actual risk — a support bot over already-public documents), later reversed in Week 4 in favor of the original blueprint's approval flow, since it's a stronger, more relevant thing to demo than billing.
-- **Local embeddings over API-based ones**: chosen to keep the project free-to-run and self-contained, with no billing infrastructure required to prove the pipeline.
-- **Vector similarity indexing (`ivfflat`/`hnsw`)**: deferred until real data volume exists to tune against.
+A `.env.example` at the repo root documents every required key as a placeholder. Real values live in `backend/.env` (local, gitignored), `backend/.env.docker` (local Docker only, gitignored), Render's Environment tab (production backend), and Vercel's Environment Variables (production frontend) — never in a committed file.
 
 ---
 
-## Known limitations
+## Database schema
 
-- No rate limiting or abuse protection on `/chat` yet
-- Multi-column PDF layouts are not specially handled (assumes mostly single-column source documents)
-- No revocation mechanism for a compromised invite link beyond manually rotating `tenants.invite_token`
-- Embedding model is uncased and can produce `[UNK]` tokens on rare characters — acceptable for retrieval, will matter if raw chunk text is ever shown to users as a citation
+8 tables, all tenant-scoped via a denormalized `tenant_id` (duplicated onto high-volume child tables deliberately, to keep RLS policies simple and fast):
+
+| Table | Purpose |
+|---|---|
+| `tenants` | One row per business — name, bot config, `website_domain`, `invite_token` |
+| `users` | Individual logins — `role` (owner/member), `status` (pending/active/declined) |
+| `documents` | Uploaded file metadata + ingestion `status` lifecycle |
+| `document_chunks` | Parsed, chunked, embedded (`vector(384)`) pieces of each document |
+| `end_users` | Anonymous-by-default website visitors |
+| `chat_sessions` | One per widget conversation — CSAT rating, start/end timestamps |
+| `messages` | Every question and answer, with response latency |
+| `message_sources` | Which chunks a given bot answer cited, with relevance scores |
+
+Primary keys are UUIDs throughout (unguessable, standard for multi-tenant SaaS). Row-Level Security is enabled on every table with real policies — "enabled with zero policies" is a deliberate, audited state nowhere in this schema; it would silently deny access to everyone, including a table's rightful owner.
+
+---
+
+## API reference
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Liveness check |
+| `POST /tenants` | JWT (identity-only) | Create a tenant on first login |
+| `POST /invite/accept` | JWT (identity-only) | Link an invited user to a tenant |
+| `GET/POST/PUT /documents` | JWT | Manage uploaded documents |
+| `POST /kb/upload` | JWT | Full ingest pipeline: parse → chunk → embed → store |
+| `GET /tenants/{id}/widget-config` | none (rate-limited) | Public bot config for the widget on load |
+| `POST /chat` | Origin check | Retrieval + generation; anonymous visitors |
+| `POST /chat/end` | Origin check | Closes a session, records CSAT |
+| `GET /sessions`, `GET /sessions/{id}/messages` | JWT | Tenant-scoped chat history |
+| `GET /admin/pending-users`, `POST /admin/approve-user`, `POST /admin/decline-user` | JWT (owner-only) | Invite approval queue |
+
+Auto-generated interactive docs are available at `/docs` on any running instance.
+
+---
+
+## Security model
+
+- **Tenant isolation, two independent layers**: application-level `WHERE tenant_id = ...` scoping *and* database-level RLS policies underneath it, so a bug in one doesn't expose the other's failure.
+- **JWT verification uses JWKS (ES256)**, not a shared secret — Supabase's actual signing scheme, fetched and cached via `PyJWKClient`.
+- **`/chat` and `/chat/end` use an Origin check, not JWT** — visitors don't log in, so authorization instead compares the real `Origin` header against the tenant's registered `website_domain`, both normalized to `scheme://host` before an exact match (a raw substring check was found and fixed as a real spoofing gap).
+- **Rate limiting** on both `/chat` and `/tenants/{id}/widget-config`, on separate keys, so normal page browsing never eats into a visitor's chat quota.
+- **CORS is deliberately permissive** (`allow_origins=["*"]`) — this is a conscious tradeoff, not an oversight: CORS only controls whether a browser lets JavaScript *read* a response, and every route that actually matters is independently protected by JWT or the Origin check above.
+- A repeatable cross-tenant attack script exercises both traffic paths (direct-Supabase and FastAPI) against every tenant-scoped table, including a self-read control that distinguishes real isolation from a table that's simply locked out for everyone.
+
+---
+
+## The RAG pipeline
+
+```
+PDF upload
+   → extract_text()        pdfplumber, page by page
+   → chunk_text()           token-exact chunking (250 tokens / 40 overlap),
+                              using the embedding model's own tokenizer
+   → embed_chunks()          ONNX runtime + MiniLM, batched, L2-normalized
+   → stored in document_chunks (pgvector)
+
+Visitor question
+   → embedded the same way as chunks (same model, same normalization)
+   → pgvector similarity search, tenant-scoped, top_k nearest chunks
+   → chunks + system prompt + question → Groq LLM
+   → grounded answer, or an honest "I don't know" if nothing relevant was found
+```
+
+Embeddings run on `onnxruntime` rather than `sentence-transformers`/`torch` specifically to fit Render's free-tier memory limit — inference-only, no training capability needed, dramatically smaller footprint for the identical output.
+
+---
+
+## Embedding the widget
+
+From a tenant's dashboard, the Embed Script page generates a snippet like:
+
+```html
+<script src="https://your-widget-host/widget.js" data-tenant-id="..."></script>
+```
+
+`widget.js` is a single, dependency-free, Shadow-DOM-isolated file — no framework, no build step required on the tenant's side. It fetches live bot settings (name, greeting, theme color) from `/tenants/{id}/widget-config` on every page load, so updating a tenant's bot settings takes effect immediately without regenerating the embed snippet.
+
+---
+
+## CI/CD pipeline
+
+```
+push / PR → GitHub Actions
+              ├── backend.yml:  ruff lint → Docker build sanity check →
+              │                  boot uvicorn → pytest smoke tests
+              │                  (real Supabase data, real tenant, read-only)
+              └── frontend.yml: eslint → next build
+                     │
+                     ▼
+         Both required as passing status checks on `main`
+         (branch protection: no direct pushes, no bypassing, even for admins)
+                     │
+                     ▼
+         Render: Auto-Deploy = "After CI Checks Pass" (backend)
+         Vercel: auto-deploys on merge to main (frontend)
+```
+
+The Docker image built and tested in CI is the same image that runs in production — the Dockerfile's Python version, dependencies, and entrypoint are identical across a local machine, `docker-compose`, CI, and Render.
+
+---
+
+## Deployment
+
+- **Backend** — Render, building directly from `backend/Dockerfile` (not buildpacks), deploying only once GitHub Actions' checks pass.
+- **Frontend** — Vercel, auto-deploying `main` on every merge.
+- **Widget** — a static file served from Vercel's `public/` folder (and mirrored to GitHub Pages for the demo test page); tenant sites load it via `<script src>`, so redeploying it updates every embedded instance with zero action from any tenant.
+
+---
+
+## Known limitations / roadmap
+
+- `GET /sessions` is capped at 100 rows with no pagination yet.
+- Declining an invited user is one-way by design — no re-invite/reversal flow.
+- No UI yet surfaces a tenant's `invite_token` as a copyable link (the token exists in the schema; nothing generates the shareable URL from it).
+
+---
+
+## Contributors
+
+Built by **Mahi** (backend, RAG pipeline, security/auth, Docker/CI-CD) and **Bhumika** (frontend dashboard, embeddable widget, CI/CD verification) over a seven-week sprint, from an empty repository to a live, multi-tenant, CI/CD-deployed product.

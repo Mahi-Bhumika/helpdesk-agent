@@ -399,28 +399,43 @@ def extract_origin(url_or_domain: str) -> str:
 
 
 # ============================================================
-# SMALLTALK PATTERNS
+# RAG CHAT PIPELINE
+# Replace your existing classification/retrieval + /chat code
+# with this entire block.
+# ============================================================
+
+import re
+import difflib
+from typing import Optional
+
+from fastapi import HTTPException, Header, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+# ============================================================
+# 1. SMALLTALK PATTERNS
 # ============================================================
 
 _GREETING_PATTERN = re.compile(
-    r"^\s*(h+[i|e|y]+|hello+|hey+|heya+|howdy+|hola+|"
-    r"good\s*(morning|afternoon|evening)|yo+|sup)\b",
+    r"^\s*(h+i+|h+e+y+|hello+|heya+|howdy+|hola+|y+o+|sup|"
+    r"good\s+(morning|afternoon|evening))\b",
     re.IGNORECASE,
 )
 
 _ACKNOWLEDGMENT_PATTERN = re.compile(
-    r"^\s*(thanks?|thank\s*you+|thx|ty|tysm|ok(ay)?|okie|got\s*it|"
-    r"cool|great|perfect|alright|sounds\s*good|awesome|nice|sure|"
-    r"no\s*problem|np)\b",
+    r"^\s*(thanks?|thank\s*you+|thx|ty|tysm|ok(?:ay)?|okie|"
+    r"got\s*it|cool|great|perfect|alright|sounds\s+good|"
+    r"awesome|nice|sure|no\s+problem|np)\b",
     re.IGNORECASE,
 )
 
 _IDENTITY_STATUS_PATTERN = re.compile(
-    r"^\s*(who\s*are\s*you|what\s*are\s*you|are\s*you\s*a\s*bot|"
-    r"how\s*are\s*you|what\s*is\s*your\s*name)\b",
+    r"^\s*(who\s+are\s+you|what\s+are\s+you|are\s+you\s+a\s+bot|"
+    r"how\s+are\s+you|what\s+is\s+your\s+name)\b",
     re.IGNORECASE,
 )
-
 
 _GREETING_WORDS = [
     "hi",
@@ -428,6 +443,7 @@ _GREETING_WORDS = [
     "hiii",
     "hey",
     "heyy",
+    "heyyy",
     "heya",
     "hello",
     "helloo",
@@ -437,13 +453,6 @@ _GREETING_WORDS = [
     "yoo",
     "sup",
     "gm",
-    "gmorning",
-]
-
-_GREETING_PHRASES = [
-    "good morning",
-    "good afternoon",
-    "good evening",
 ]
 
 _ACK_WORDS = [
@@ -503,29 +512,31 @@ def classify_smalltalk(
     question: str,
     has_history: bool = False,
 ) -> tuple[str, str] | None:
-    """
-    Detects standalone smalltalk.
 
-    Important:
-    Long questions are never treated as smalltalk.
-    """
+    raw = question.strip()
 
-    raw_cleaned = question.strip()
-    word_count = len(raw_cleaned.split())
+    if not raw:
+        return None
 
+    word_count = len(raw.split())
+
+    # Never classify long questions as smalltalk.
     if word_count > 5:
         return None
 
-    if _IDENTITY_STATUS_PATTERN.search(raw_cleaned):
+    if _IDENTITY_STATUS_PATTERN.search(raw):
         return (
             "identity",
-            "I am an AI support assistant here to help answer your questions based on our knowledge base.",
+            "I am an AI support assistant here to help answer your questions.",
         )
 
-    if _GREETING_PATTERN.search(raw_cleaned):
-        return ("greeting", "greeting_placeholder")
+    if _GREETING_PATTERN.search(raw):
+        return (
+            "greeting",
+            "greeting_placeholder",
+        )
 
-    if _ACKNOWLEDGMENT_PATTERN.search(raw_cleaned):
+    if _ACKNOWLEDGMENT_PATTERN.search(raw):
         return (
             "acknowledgment",
             "You're welcome! Let me know if there's anything else I can help with.",
@@ -536,7 +547,7 @@ def classify_smalltalk(
         normalized = re.sub(
             r"[^a-z\s]",
             "",
-            raw_cleaned.lower(),
+            raw.lower(),
         ).strip()
 
         normalized = re.sub(
@@ -557,7 +568,7 @@ def classify_smalltalk(
         ):
             return (
                 "identity",
-                "I am an AI support assistant here to help answer your questions based on our knowledge base.",
+                "I am an AI support assistant here to help answer your questions.",
             )
 
         if (
@@ -566,13 +577,16 @@ def classify_smalltalk(
                 _GREETING_WORDS,
                 cutoff=0.72,
             )
-            or _fuzzy_match(
-                normalized,
-                _GREETING_PHRASES,
-                cutoff=0.72,
-            )
+            or normalized in [
+                "good morning",
+                "good afternoon",
+                "good evening",
+            ]
         ):
-            return ("greeting", "greeting_placeholder")
+            return (
+                "greeting",
+                "greeting_placeholder",
+            )
 
         if (
             _fuzzy_match(
@@ -595,279 +609,120 @@ def classify_smalltalk(
 
 
 # ============================================================
-# QUERY INTENT
+# 2. QUERY TYPE DETECTION
 # ============================================================
 
-class QueryIntent(str, Enum):
-    factual = "factual"
-    attribute_lookup = "attribute_lookup"
-    multi_entity_attribute = "multi_entity_attribute"
-    comparison = "comparison"
-    summary = "summary"
-    catalog = "catalog"
-    continuation = "continuation"
-    clarification = "clarification"
-
-
-class ResolvedQuery(BaseModel):
-    standalone_query: str
-
-    intent: QueryIntent
-
-    entities: list[str] = Field(
-        default_factory=list
-    )
-
-    attributes: list[str] = Field(
-        default_factory=list
-    )
-
-    comparison_operator: str | None = None
-
-    requires_all_products: bool = False
-
-    requires_previous_context: bool = False
-
-
-# ============================================================
-# QUERY RESOLUTION
-# ============================================================
-
-def resolve_query(
-    question: str,
-    history_rows: list,
-) -> ResolvedQuery:
-    """
-    Converts a conversational question into a standalone
-    retrieval query.
-
-    Example:
-
-        User:
-        "which product has the maximum coverage?"
-
-        User:
-        "what's the price of it?"
-
-    becomes approximately:
-
-        "What is the price of the AetherVane Pro-X?"
-    """
-
-    history_text = "\n".join(
-        [
-            (
-                f"{'User' if getattr(h, 'sender', '') == 'user' else 'Assistant'}: "
-                f"{getattr(h, 'content', '')}"
-            )
-            for h in history_rows[-8:]
-        ]
-    )
-
-    resolver_prompt = """
-You are the query-resolution layer of a RAG customer-support system.
-
-DO NOT answer the user's question.
-
-Your job is to understand the current user message using
-the conversation history and produce a structured query
-for document retrieval.
-
-IMPORTANT RULES:
-
-1. Resolve conversational references.
-
-Examples:
-
-"what's its price?"
-"what is the price of it?"
-"what about that one?"
-"tell me more about it"
-"what are their prices?"
-"is it the biggest?"
-"what about the other one?"
-
-Resolve "it", "its", "that", "this", "they", "their",
-"these", "those", and similar references using conversation
-history.
-
-2. Preserve exact product/entity names whenever they are
-available in the conversation.
-
-3. NEVER invent a product or entity.
-
-4. If the user asks about ALL products, set:
-
-requires_all_products = true
-
-5. Comparison questions include:
-
-- most expensive
-- cheapest
-- largest
-- smallest
-- maximum
-- minimum
-- highest
-- lowest
-- biggest
-- best
-- worst
-
-6. For comparison questions, identify the attribute.
-
-Examples:
-
-"most expensive"
-→ attribute: price
-→ comparison_operator: maximum
-
-"cheapest"
-→ attribute: price
-→ comparison_operator: minimum
-
-"maximum area coverage"
-→ attribute: area coverage
-→ comparison_operator: maximum
-
-"lowest power"
-→ attribute: power
-→ comparison_operator: minimum
-
-7. DO NOT invent what "best" means.
-
-If the user says "is it the best product?",
-retrieve information about that product and the available
-product attributes, but do not decide that "best" means
-price, coverage, power, etc. unless the conversation
-explicitly establishes that.
-
-8. Summary questions should identify the entity being
-summarized.
-
-Examples:
-
-"summarize it"
-→ summary of the previously discussed product
-
-"give me a summary of the products"
-→ catalog/summary across products
-
-9. If the question asks for a property of multiple products,
-use:
-
-intent = "multi_entity_attribute"
-
-10. If the user asks for all products, services, offerings,
-catalog items, etc., use:
-
-intent = "catalog"
-
-11. If the user asks whether there is anything else / more
-options / other products, use:
-
-intent = "continuation"
-
-12. standalone_query must be a complete search query containing
-all necessary entity names and requested attributes.
-
-13. The standalone_query should be optimized for retrieval,
-not conversational.
-
-Return ONLY valid JSON matching the requested schema.
-"""
-
-    messages = [
-        {
-            "role": "system",
-            "content": resolver_prompt,
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Conversation History:\n"
-                f"{history_text or '(no previous conversation)'}\n\n"
-                f"Current User Question:\n"
-                f"{question}"
-            ),
-        },
-    ]
-
-    try:
-
-        completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=messages,
-            temperature=0,
-            max_tokens=500,
-            response_format={
-                "type": "json_object",
-            },
-        )
-
-        raw = completion.choices[0].message.content
-
-        parsed = json.loads(raw)
-
-        resolved = ResolvedQuery.model_validate(parsed)
-
-        print(
-            "[DEBUG] Query resolved:",
-            resolved.model_dump(),
-        )
-
-        return resolved
-
-    except Exception as e:  # noqa: BLE001
-
-        print(
-            f"[DEBUG] Query resolver failed: {e}"
-        )
-
-        # Safe fallback.
-        return ResolvedQuery(
-            standalone_query=question,
-            intent=QueryIntent.factual,
-        )
-
-
-# ============================================================
-# SIMPLE QUERY DETECTORS
-# ============================================================
-
-_ENUMERATION_PATTERNS = re.compile(
+_ENUMERATION_PATTERN = re.compile(
     r"\b("
-    r"list\s+(of\s+)?(all|everything)|"
+    r"list\s+(?:of\s+)?(?:all|everything)|"
     r"full\s+list|"
     r"complete\s+list|"
-    r"all\s+(of\s+)?(the\s+|your\s+)?"
-    r"(products|services|items|things)|"
-    r"what\s+(services|products|items)\s+do\s+you\s+"
-    r"(offer|have|sell)|"
-    r"everything\s+you\s+(offer|have|sell)|"
+    r"all\s+(?:of\s+)?(?:the\s+|your\s+)?"
+    r"(?:products|services|items|things)|"
+    r"what\s+(?:services|products|items)\s+do\s+you\s+"
+    r"(?:offer|have|sell)|"
+    r"everything\s+you\s+(?:offer|have|sell)|"
     r"catalog|"
-    r"show\s+(me\s+)?(all|everything)|"
-    r"what\s+do\s+you\s+(offer|sell|have)|"
-    r"what\s+all\s+(do\s+you\s+)?(have|offer|sell)"
+    r"show\s+(?:me\s+)?(?:all|everything)|"
+    r"what\s+do\s+you\s+(?:offer|sell|have)|"
+    r"what\s+all\s+(?:do\s+you\s+)?(?:have|offer|sell)|"
+    r"what\s+are\s+(?:your|the)\s+products"
     r")\b",
     re.IGNORECASE,
 )
 
 
-_SUMMARY_PATTERNS = re.compile(
+_SUMMARY_PATTERN = re.compile(
     r"\b("
-    r"summarize|"
-    r"summary|"
-    r"give\s+me\s+a\s+summary|"
-    r"brief\s+overview|"
+    r"summar(?:y|ise|ize)|"
+    r"overview|"
     r"recap|"
-    r"tl;?dr"
+    r"tl;?dr|"
+    r"brief(?:ly)?|"
+    r"give\s+me\s+the\s+gist"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_PRICE_PATTERN = re.compile(
+    r"\b("
+    r"price|"
+    r"prices|"
+    r"pricing|"
+    r"cost|"
+    r"costs|"
+    r"expensive|"
+    r"cheap|"
+    r"cheapest|"
+    r"least\s+expensive|"
+    r"most\s+expensive|"
+    r"costliest|"
+    r"how\s+much|"
+    r"worth"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_COMPARISON_PATTERN = re.compile(
+    r"\b("
+    r"compare|"
+    r"comparison|"
+    r"versus|"
+    r"\bvs\b|"
+    r"difference|"
+    r"better|"
+    r"best|"
+    r"worst|"
+    r"higher|"
+    r"lower|"
+    r"maximum|"
+    r"minimum|"
+    r"largest|"
+    r"smallest|"
+    r"highest|"
+    r"lowest|"
+    r"least|"
+    r"most"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_RANKING_PATTERN = re.compile(
+    r"\b("
+    r"rank|"
+    r"ranking|"
+    r"order\s+(?:the\s+)?products|"
+    r"sort\s+(?:the\s+)?products|"
+    r"top\s+\d+|"
+    r"which\s+is\s+(?:the\s+)?(?:best|worst|cheapest|most\s+expensive)|"
+    r"which\s+product"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_RECOMMENDATION_PATTERN = re.compile(
+    r"\b("
+    r"should\s+i\s+buy|"
+    r"should\s+i\s+get|"
+    r"should\s+i\s+choose|"
+    r"recommend|"
+    r"recommendation|"
+    r"which\s+should\s+i|"
+    r"what\s+should\s+i\s+buy|"
+    r"is\s+it\s+worth|"
+    r"worth\s+buying|"
+    r"good\s+choice"
     r")\b",
     re.IGNORECASE,
 )
 
 
 _CONTINUATION_TRIGGERS = [
+    "and",
     "and?",
     "anything else",
     "any other",
@@ -886,32 +741,32 @@ _CONTINUATION_TRIGGERS = [
 ]
 
 
-def is_enumeration_query(
-    question: str,
-) -> bool:
-    return bool(
-        _ENUMERATION_PATTERNS.search(question)
-    )
+def is_enumeration_query(question: str) -> bool:
+    return bool(_ENUMERATION_PATTERN.search(question))
 
 
-def is_summary_query(
-    question: str,
-) -> bool:
-    return bool(
-        _SUMMARY_PATTERNS.search(question)
-    )
+def is_summary_query(question: str) -> bool:
+    return bool(_SUMMARY_PATTERN.search(question))
 
 
-def is_continuation_query(
-    question: str,
-) -> bool:
+def is_price_query(question: str) -> bool:
+    return bool(_PRICE_PATTERN.search(question))
 
-    q = (
-        question
-        .strip()
-        .lower()
-        .rstrip("?!.")
-    )
+
+def is_comparison_query(question: str) -> bool:
+    return bool(_COMPARISON_PATTERN.search(question))
+
+
+def is_ranking_query(question: str) -> bool:
+    return bool(_RANKING_PATTERN.search(question))
+
+
+def is_recommendation_query(question: str) -> bool:
+    return bool(_RECOMMENDATION_PATTERN.search(question))
+
+
+def is_continuation_query(question: str) -> bool:
+    q = question.strip().lower().rstrip("?!.,")
 
     if not q:
         return False
@@ -919,17 +774,205 @@ def is_continuation_query(
     if len(q.split()) > 6:
         return False
 
-    if q == "and":
-        return True
-
-    return any(
-        trigger.rstrip("?!.") in q
-        for trigger in _CONTINUATION_TRIGGERS
+    return (
+        q == "and"
+        or any(
+            q == trigger.rstrip("?!.")
+            for trigger in _CONTINUATION_TRIGGERS
+        )
     )
 
 
 # ============================================================
-# API MODELS
+# 3. FOLLOW-UP / QUERY REWRITE
+# ============================================================
+
+_FOLLOWUP_TRIGGERS = [
+    "tell me more",
+    "more details",
+    "how much",
+    "price",
+    "cost",
+    "and the other",
+    "what about",
+    "the other one",
+    "both",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "their",
+    "them",
+    "how much is it",
+    "why",
+    "where",
+    "can i get",
+    "is it available",
+    "how do i",
+    "any other",
+    "other options",
+    "what else",
+    "anything else",
+    "more",
+    "others",
+    "least expensive",
+    "most expensive",
+    "costliest",
+    "cheapest",
+]
+
+
+def _needs_query_rewrite(
+    question: str,
+    history_rows: list,
+) -> bool:
+
+    if not history_rows:
+        return False
+
+    q = question.strip().lower()
+
+    # Short questions are almost always potentially contextual.
+    if len(q.split()) <= 8:
+        return True
+
+    return any(
+        trigger in q
+        for trigger in _FOLLOWUP_TRIGGERS
+    )
+
+
+def _rewrite_query_for_retrieval(
+    question: str,
+    history_rows: list,
+) -> str:
+
+    history_str = "\n".join(
+        [
+            (
+                f"{'User' if getattr(h, 'sender', '') == 'user' else 'Assistant'}: "
+                f"{getattr(h, 'content', '')}"
+            )
+            for h in history_rows[-8:]
+        ]
+    )
+
+    rewrite_prompt = [
+        {
+            "role": "system",
+            "content": """
+You are a search-query reformulation module for a business RAG chatbot.
+
+Your job is to convert a user's follow-up question into a standalone retrieval query.
+
+Use the conversation history to resolve:
+- it
+- this
+- that
+- those
+- them
+- its
+- their
+- the other one
+- the product
+- the catalog
+- prices
+- rankings
+- comparisons
+
+IMPORTANT:
+Preserve the user's actual intent.
+
+Examples:
+
+User: "what are the products?"
+Follow-up: "which is cheapest?"
+Output:
+"which product is the cheapest by price in the product catalog"
+
+User: "what are the products?"
+Follow-up: "price of luminamist"
+Output:
+"price of LuminaMist Diffuser"
+
+User: "what are the products?"
+Follow-up: "rank them"
+Output:
+"rank the products in the catalog using the available product information"
+
+User: "tell me about AetherVane 500"
+Follow-up: "what about its price?"
+Output:
+"price of AetherVane 500"
+
+User: "what is AetherVane 500?"
+Follow-up: "is it worth buying?"
+Output:
+"whether AetherVane 500 is worth buying based on its documented features, specifications, and price"
+
+Do NOT answer the question.
+
+Output ONLY the standalone search query.
+""",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Conversation History:\n{history_str}\n\n"
+                f"Current User Question:\n{question}\n\n"
+                "Standalone Search Query:"
+            ),
+        },
+    ]
+
+    try:
+
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=rewrite_prompt,
+            temperature=0.0,
+            max_tokens=100,
+        )
+
+        rewritten = (
+            response.choices[0]
+            .message.content
+            .strip()
+            .strip('"')
+            .strip()
+        )
+
+        if rewritten:
+            return rewritten
+
+    except Exception as e:
+        print(
+            f"[DEBUG] Query rewrite failed: {e}"
+        )
+
+    return question
+
+
+# ============================================================
+# 4. QUERY CONFIGURATION
+# ============================================================
+
+NORMAL_TOP_K = 8
+NORMAL_THRESHOLD = 0.25
+
+# Broad retrieval for catalog/comparison questions.
+WIDE_TOP_K = 30
+WIDE_THRESHOLD = 0.12
+
+# Very broad retrieval for catalog-wide questions.
+CATALOG_TOP_K = 50
+CATALOG_THRESHOLD = 0.08
+
+
+# ============================================================
+# 5. REQUEST / RESPONSE MODELS
 # ============================================================
 
 class ChatQuery(BaseModel):
@@ -951,282 +994,7 @@ class ChatResponse(BaseModel):
 
 
 # ============================================================
-# RETRIEVAL SETTINGS
-# ============================================================
-
-NORMAL_TOP_K = 8
-ENTITY_TOP_K = 15
-COMPARISON_TOP_K = 40
-SUMMARY_TOP_K = 30
-CATALOG_TOP_K = 40
-CONTINUATION_TOP_K = 40
-
-NORMAL_THRESHOLD = 0.25
-ENTITY_THRESHOLD = 0.12
-COMPARISON_THRESHOLD = 0.12
-SUMMARY_THRESHOLD = 0.12
-CATALOG_THRESHOLD = 0.12
-CONTINUATION_THRESHOLD = 0.12
-
-MAX_CONTEXT_CHARS = 24000
-
-
-# ============================================================
-# ENTITY-AWARE VECTOR RETRIEVAL
-# ============================================================
-
-async def retrieve_chunks(
-    db: AsyncSession,
-    tenant_id: str,
-    query_embedding,
-    resolved: ResolvedQuery,
-):
-    """
-    Performs vector retrieval while giving exact entity mentions
-    priority.
-
-    This is important for follow-ups like:
-
-        "what's the price of it?"
-
-because pure vector similarity can otherwise return generic
-price chunks instead of the price chunk belonging to the
-previously discussed product.
-    """
-
-    intent = resolved.intent
-
-    if resolved.requires_all_products:
-        top_k = CATALOG_TOP_K
-        threshold = CATALOG_THRESHOLD
-
-    elif intent == QueryIntent.comparison:
-        top_k = COMPARISON_TOP_K
-        threshold = COMPARISON_THRESHOLD
-
-    elif intent == QueryIntent.summary:
-        top_k = SUMMARY_TOP_K
-        threshold = SUMMARY_THRESHOLD
-
-    elif intent == QueryIntent.catalog:
-        top_k = CATALOG_TOP_K
-        threshold = CATALOG_THRESHOLD
-
-    elif intent == QueryIntent.continuation:
-        top_k = CONTINUATION_TOP_K
-        threshold = CONTINUATION_THRESHOLD
-
-    elif resolved.entities:
-        top_k = ENTITY_TOP_K
-        threshold = ENTITY_THRESHOLD
-
-    else:
-        top_k = NORMAL_TOP_K
-        threshold = NORMAL_THRESHOLD
-
-    top_k = min(
-        top_k,
-        50,
-    )
-
-    # --------------------------------------------------------
-    # Build entity matching conditions.
-    #
-    # We don't use these as the ONLY retrieval mechanism.
-    # Vector similarity still matters.
-    # --------------------------------------------------------
-
-    entity_conditions = []
-    entity_params = {}
-
-    for i, entity in enumerate(
-        resolved.entities[:8]
-    ):
-
-        param_name = f"entity_{i}"
-
-        entity_conditions.append(
-            f"LOWER(chunk_text) LIKE LOWER(:{param_name})"
-        )
-
-        entity_params[param_name] = (
-            f"%{entity}%"
-        )
-
-    if entity_conditions:
-
-        entity_match_sql = (
-            " OR ".join(entity_conditions)
-        )
-
-    else:
-
-        entity_match_sql = "FALSE"
-
-    search_query = text(
-        f"""
-        SELECT
-            chunk_id,
-            chunk_text,
-            chunk_index,
-            document_id,
-
-            embedding <=> :query_embedding AS distance,
-
-            CASE
-                WHEN {entity_match_sql}
-                THEN 0
-                ELSE 1
-            END AS entity_match
-
-        FROM document_chunks
-
-        WHERE tenant_id = CAST(:tenant_id AS uuid)
-
-        ORDER BY
-            entity_match ASC,
-            embedding <=> :query_embedding ASC
-
-        LIMIT :top_k
-        """
-    )
-
-    result = await db.execute(
-        search_query,
-        {
-            "query_embedding": str(
-                query_embedding
-            ),
-            "tenant_id": tenant_id,
-            "top_k": top_k,
-            **entity_params,
-        },
-    )
-
-    rows = result.fetchall()
-
-    retrieved_chunks = []
-
-    for row in rows:
-
-        similarity = (
-            1 - float(row.distance)
-        )
-
-        # Exact entity matches get a more permissive
-        # threshold because lexical entity matching gives
-        # us strong evidence that the chunk is about the
-        # requested product.
-        if row.entity_match == 0:
-
-            keep = similarity >= 0.05
-
-        else:
-
-            keep = similarity >= threshold
-
-        if keep:
-
-            chunk = dict(
-                row._mapping
-            )
-
-            chunk["similarity"] = similarity
-
-            retrieved_chunks.append(
-                chunk
-            )
-
-    # --------------------------------------------------------
-    # Deduplicate
-    # --------------------------------------------------------
-
-    seen = set()
-    deduped = []
-
-    for chunk in retrieved_chunks:
-
-        chunk_id = str(
-            chunk["chunk_id"]
-        )
-
-        if chunk_id in seen:
-            continue
-
-        seen.add(chunk_id)
-
-        deduped.append(chunk)
-
-    retrieved_chunks = deduped
-
-    print(
-        "[DEBUG] Retrieved chunks:",
-        [
-            {
-                "chunk_id": str(
-                    c["chunk_id"]
-                ),
-                "similarity": round(
-                    c["similarity"],
-                    3,
-                ),
-                "entity_match": c.get(
-                    "entity_match"
-                ),
-            }
-            for c in retrieved_chunks
-        ],
-    )
-
-    return retrieved_chunks
-
-
-# ============================================================
-# CONTEXT BUILDER
-# ============================================================
-
-def build_context(
-    retrieved_chunks: list[dict],
-) -> str:
-
-    if not retrieved_chunks:
-        return "NO_RELEVANT_CONTEXT_FOUND"
-
-    context_parts = []
-    total_chars = 0
-
-    for index, chunk in enumerate(
-        retrieved_chunks
-    ):
-
-        block = (
-            f"[Source {index + 1}]\n"
-            f"{chunk['chunk_text']}"
-        )
-
-        if (
-            total_chars
-            + len(block)
-            > MAX_CONTEXT_CHARS
-        ):
-            break
-
-        context_parts.append(
-            block
-        )
-
-        total_chars += len(block)
-
-    if not context_parts:
-        return "NO_RELEVANT_CONTEXT_FOUND"
-
-    return "\n\n---\n\n".join(
-        context_parts
-    )
-
-
-# ============================================================
-# MAIN CHAT ENDPOINT
+# 6. MAIN CHAT ENDPOINT
 # ============================================================
 
 @app.post(
@@ -1243,9 +1011,14 @@ async def chat(
         query.tenant_id
     )
 
-    # ========================================================
-    # 1. TENANT CONFIGURATION
-    # ========================================================
+    top_k = min(
+        max(query.top_k, 1),
+        10,
+    )
+
+    # --------------------------------------------------------
+    # A. TENANT
+    # --------------------------------------------------------
 
     tenant_row = await db.execute(
         text(
@@ -1256,7 +1029,8 @@ async def chat(
                 bot_name,
                 greeting_message
             FROM tenants
-            WHERE tenant_id = CAST(:tid AS uuid)
+            WHERE tenant_id =
+                CAST(:tid AS uuid)
             """
         ),
         {
@@ -1292,9 +1066,9 @@ async def chat(
             ),
         )
 
-    # ========================================================
-    # 2. SESSION
-    # ========================================================
+    # --------------------------------------------------------
+    # B. SESSION
+    # --------------------------------------------------------
 
     session_id = query.session_id
 
@@ -1340,14 +1114,12 @@ async def chat(
         )
 
         session_id = str(
-            session_result
-            .fetchone()
-            .session_id
+            session_result.fetchone().session_id
         )
 
-    # ========================================================
-    # 3. CONVERSATION HISTORY
-    # ========================================================
+    # --------------------------------------------------------
+    # C. HISTORY
+    # --------------------------------------------------------
 
     history_result = await db.execute(
         text(
@@ -1373,22 +1145,18 @@ async def chat(
         )
     )
 
-    # ========================================================
-    # 4. SMALLTALK
-    # ========================================================
+    # --------------------------------------------------------
+    # D. SMALLTALK
+    # --------------------------------------------------------
 
     smalltalk_match = classify_smalltalk(
         query.question,
-        has_history=bool(
-            history_rows
-        ),
+        has_history=bool(history_rows),
     )
 
     if smalltalk_match:
 
-        kind, canned_reply = (
-            smalltalk_match
-        )
+        kind, canned_reply = smalltalk_match
 
         if kind == "greeting":
 
@@ -1398,7 +1166,6 @@ async def chat(
             )
 
         else:
-
             reply = canned_reply
 
         await db.execute(
@@ -1452,70 +1219,230 @@ async def chat(
         await db.commit()
 
         return ChatResponse(
-            session_id=str(
-                session_id
-            ),
+            session_id=str(session_id),
             answer=reply,
             sources=[],
         )
 
-    # ========================================================
-    # 5. RESOLVE QUERY
-    # ========================================================
+    # --------------------------------------------------------
+    # E. CLASSIFY QUERY
+    # --------------------------------------------------------
 
-    resolved = resolve_query(
-        question=query.question,
-        history_rows=history_rows,
+    is_enum = is_enumeration_query(
+        query.question
     )
 
-    # Explicit continuation override.
-    if is_continuation_query(
+    is_summary = is_summary_query(
         query.question
+    )
+
+    is_price = is_price_query(
+        query.question
+    )
+
+    is_comparison = is_comparison_query(
+        query.question
+    )
+
+    is_ranking = is_ranking_query(
+        query.question
+    )
+
+    is_recommendation = is_recommendation_query(
+        query.question
+    )
+
+    is_continuation = is_continuation_query(
+        query.question
+    )
+
+    # --------------------------------------------------------
+    # F. REWRITE FOLLOW-UPS
+    # --------------------------------------------------------
+
+    retrieval_query_text = query.question
+
+    if _needs_query_rewrite(
+        query.question,
+        history_rows,
     ):
 
-        resolved.intent = (
-            QueryIntent.continuation
+        retrieval_query_text = (
+            _rewrite_query_for_retrieval(
+                query.question,
+                history_rows,
+            )
         )
 
-        resolved.requires_all_products = True
+        print(
+            "[DEBUG] Rewritten query: "
+            f"'{retrieval_query_text}'"
+        )
 
-    print(
-        "[DEBUG] Final resolved query:",
-        resolved.model_dump(),
+    # --------------------------------------------------------
+    # G. RETRIEVAL MODE
+    # --------------------------------------------------------
+
+    catalog_wide_query = (
+        is_enum
+        or is_summary
+        or is_ranking
+        or is_comparison
+        or is_price
+        or is_continuation
     )
 
-    # ========================================================
-    # 6. EMBEDDING
-    # ========================================================
+    if catalog_wide_query:
 
-    retrieval_query_text = (
-        resolved.standalone_query
-    )
+        effective_top_k = max(
+            WIDE_TOP_K,
+            top_k,
+        )
+
+        effective_threshold = (
+            WIDE_THRESHOLD
+        )
+
+    else:
+
+        effective_top_k = top_k
+
+        effective_threshold = (
+            NORMAL_THRESHOLD
+        )
+
+    # Catalog-wide requests get an especially large search.
+    if is_enum or is_summary:
+
+        effective_top_k = (
+            CATALOG_TOP_K
+        )
+
+        effective_threshold = (
+            CATALOG_THRESHOLD
+        )
+
+    # --------------------------------------------------------
+    # H. EMBEDDING
+    # --------------------------------------------------------
 
     query_embedding = embed_chunks(
         [retrieval_query_text]
     )[0]
 
-    # ========================================================
-    # 7. VECTOR + ENTITY RETRIEVAL
-    # ========================================================
+    # --------------------------------------------------------
+    # I. VECTOR SEARCH
+    # --------------------------------------------------------
 
-    retrieved_chunks = (
-        await retrieve_chunks(
-            db=db,
-            tenant_id=query.tenant_id,
-            query_embedding=query_embedding,
-            resolved=resolved,
+    search_query = text(
+        """
+        SELECT
+            chunk_id,
+            chunk_text,
+            chunk_index,
+            document_id,
+            embedding <=> :query_embedding AS distance
+        FROM document_chunks
+        WHERE tenant_id =
+            CAST(:tenant_id AS uuid)
+        ORDER BY
+            embedding <=> :query_embedding
+        LIMIT :top_k
+        """
+    )
+
+    result = await db.execute(
+        search_query,
+        {
+            "query_embedding": str(
+                query_embedding
+            ),
+            "tenant_id": query.tenant_id,
+            "top_k": effective_top_k,
+        },
+    )
+
+    rows = result.fetchall()
+
+    # --------------------------------------------------------
+    # J. THRESHOLD FILTERING
+    # --------------------------------------------------------
+
+    retrieved_chunks = [
+        dict(row._mapping)
+        for row in rows
+        if (
+            1 - row.distance
+        ) >= effective_threshold
+    ]
+
+    # --------------------------------------------------------
+    # K. SAFETY FALLBACK
+    # --------------------------------------------------------
+    #
+    # If nothing cleared the threshold, keep the strongest
+    # result if it is at least somewhat relevant.
+    #
+    # This prevents:
+    #
+    # "what is LuminaMist?"
+    #
+    # from becoming a fallback simply because its similarity
+    # happened to be 0.22.
+    # --------------------------------------------------------
+
+    if (
+        not retrieved_chunks
+        and rows
+    ):
+
+        best = rows[0]
+
+        best_similarity = (
+            1 - best.distance
         )
-    )
 
-    # ========================================================
-    # 8. CONTEXT
-    # ========================================================
+        if best_similarity >= 0.18:
 
-    context = build_context(
-        retrieved_chunks
-    )
+            retrieved_chunks = [
+                dict(best._mapping)
+            ]
+
+            print(
+                "[DEBUG] Relaxed retrieval "
+                f"accepted similarity="
+                f"{best_similarity:.3f}"
+            )
+
+    # --------------------------------------------------------
+    # L. BUILD CONTEXT
+    # --------------------------------------------------------
+
+    if retrieved_chunks:
+
+        context_parts = []
+
+        for index, chunk in enumerate(
+            retrieved_chunks,
+            start=1,
+        ):
+
+            context_parts.append(
+                (
+                    f"[SOURCE {index}]\n"
+                    f"{chunk['chunk_text']}"
+                )
+            )
+
+        context = "\n\n---\n\n".join(
+            context_parts
+        )
+
+    else:
+
+        context = (
+            "NO_RELEVANT_CONTEXT_FOUND"
+        )
 
     fallback_text = (
         tenant.fallback_message
@@ -1526,15 +1453,14 @@ async def chat(
         )
     )
 
-    # ========================================================
-    # 9. CHECK "ANYTHING ELSE?"
-    # ========================================================
+    # --------------------------------------------------------
+    # M. SPECIAL "ANYTHING ELSE" CHECK
+    # --------------------------------------------------------
 
     no_more_items = False
 
     if (
-        resolved.intent
-        == QueryIntent.continuation
+        is_continuation
         and history_rows
     ):
 
@@ -1547,12 +1473,9 @@ async def chat(
                     FROM message_sources ms
                     JOIN messages m
                         ON m.message_id =
-                            ms.message_id
+                           ms.message_id
                     WHERE m.session_id =
-                        CAST(
-                            :session_id
-                            AS uuid
-                        )
+                        CAST(:session_id AS uuid)
                     """
                 ),
                 {
@@ -1564,16 +1487,13 @@ async def chat(
         already_cited_ids = {
             str(r.chunk_id)
             for r in (
-                prior_sources_result
-                .fetchall()
+                prior_sources_result.fetchall()
             )
         }
 
         retrieved_ids = {
-            str(
-                c["chunk_id"]
-            )
-            for c in retrieved_chunks
+            str(chunk["chunk_id"])
+            for chunk in retrieved_chunks
         }
 
         new_chunk_ids = (
@@ -1586,219 +1506,264 @@ async def chat(
             and not new_chunk_ids
         )
 
-    # ========================================================
-    # 10. ANSWER PROMPT
-    # ========================================================
+    # --------------------------------------------------------
+    # N. SYSTEM PROMPT
+    # --------------------------------------------------------
+
+    bot_name = (
+        tenant.bot_name
+        or "a helpful AI assistant"
+    )
 
     if no_more_items:
 
         system_prompt = f"""
-You are {tenant.bot_name or "a helpful AI assistant"},
-a support assistant for this business.
+You are {bot_name}, a support assistant for this business.
 
-The user is asking whether there are any other products,
-options, or items beyond what was already discussed.
+The user is asking whether there is anything else beyond what was already discussed.
 
-The retrieved context contains no new items beyond the
-products/options already discussed.
+The retrieved information contains no additional relevant products or information.
 
-Reply with ONE short, warm sentence confirming that those
-are all the currently available options in that category.
-
-Do not apologize.
-
-Do not say you don't understand.
-
-Do not ask the user to rephrase.
+Reply with one short, natural sentence saying that this is everything currently available in the relevant category.
 
 Do not invent anything.
+Do not apologize.
+Do not say you cannot understand.
 """
 
     else:
 
-        if (
-            resolved.intent
-            == QueryIntent.comparison
-        ):
+        system_prompt = f"""
+You are {bot_name}, a support assistant for this business.
 
-            task_instruction = """
-This is a COMPARISON question.
+Your job is to answer the user's question using the retrieved business information.
 
-You MUST compare the relevant products using the requested
-attribute.
+IMPORTANT KNOWLEDGE RULE:
+You may ONLY use factual information explicitly present in the Retrieved Context.
+
+Conversation history may be used to resolve references such as:
+- it
+- this
+- that
+- its
+- their
+- them
+- the product
+- the other one
+
+But conversation history is NOT an independent source of facts.
+
+Do NOT invent prices.
+Do NOT invent product specifications.
+Do NOT invent product names.
+Do NOT invent rankings.
+Do NOT invent recommendations.
+Do NOT assume that one product is better than another unless the retrieved information supports the comparison.
+
+============================================================
+QUERY-SPECIFIC BEHAVIOR
+============================================================
+
+1. PRODUCT / CATALOG QUESTIONS
+
+If the user asks for products, offerings, or the catalog:
+
+Return all relevant products found in the Retrieved Context.
+
+Use bullet points.
+
+Do not arbitrarily omit relevant products.
+
+------------------------------------------------------------
+
+2. SUMMARY QUESTIONS
+
+If the user asks to summarize, give an overview, recap, or TL;DR:
+
+Create a concise summary using the relevant information from the Retrieved Context.
+
+Include the important products, features, specifications, prices, or other facts that are actually present.
+
+Do not reduce the answer to only the first retrieved chunk.
+
+------------------------------------------------------------
+
+3. PRICE QUESTIONS
+
+If the user asks for:
+- a price
+- prices
+- cost
+- cheapest
+- least expensive
+- most expensive
+- costliest
+- how much
+
+Search the ENTIRE Retrieved Context for price information.
+
+If multiple products have prices, compare them when the user asks for cheapest or most expensive.
+
+If the requested product's price is present, give it.
+
+If its price is NOT present, say that the price is not available in the retrieved catalog information.
+
+Do NOT guess.
+
+------------------------------------------------------------
+
+4. COMPARISON QUESTIONS
+
+If the user asks which product is:
+- cheapest
+- most expensive
+- best
+- worst
+- largest
+- smallest
+- highest
+- lowest
+- maximum
+- minimum
+- better
+
+Compare the relevant products using ONLY attributes explicitly present in the Retrieved Context.
 
 For example:
 
-"most expensive"
-→ compare prices
+If the user asks:
+"which is the least expensive?"
 
-"cheapest"
-→ compare prices
+Compare the documented prices.
 
-"maximum area coverage"
-→ compare area coverage
+If the user asks:
+"which has the largest area coverage?"
 
-"lowest power"
-→ compare power
+Compare the documented area coverage values.
 
-IMPORTANT:
+Do not choose a winner if the required information is missing.
 
-Do NOT select the product whose chunk has the highest
-vector similarity.
+------------------------------------------------------------
 
-Actually inspect the retrieved product information.
+5. RANKING QUESTIONS
 
-If a comparison cannot be established from the retrieved
-context, use the fallback message.
-"""
+If the user asks:
+- rank the products
+- rank them
+- top products
+- order the products
 
-        elif (
-            resolved.intent
-            == QueryIntent.summary
-        ):
+Determine the ranking criterion from the question.
 
-            task_instruction = """
-This is a SUMMARY request.
+If no criterion is specified, DO NOT invent one.
 
-Summarize the requested entity or products.
+Instead say that you can rank them by a specific criterion such as price, area coverage, power, or another documented attribute.
 
-If the user said "summarize it", use the resolved entity
-from the Resolved Query.
+If a criterion IS specified, rank using only documented values from the Retrieved Context.
 
-Combine information from multiple retrieved chunks when
-necessary.
+------------------------------------------------------------
 
-Do not introduce unrelated products.
-"""
+6. RECOMMENDATION QUESTIONS
 
-        elif (
-            resolved.intent
-            == QueryIntent.catalog
-            or resolved.requires_all_products
-        ):
+If the user asks:
+- should I buy this?
+- should I choose this?
+- is it worth buying?
+- which should I buy?
 
-            task_instruction = """
-This is a CATALOG / ALL-PRODUCTS request.
+Do NOT make up personal opinions.
 
-Produce a comprehensive bullet-point list of the relevant
-products/items found in Retrieved Context.
-
-Use ALL relevant retrieved information.
-
-Do not invent products.
-
-Do not omit products merely because one product's chunk
-has a lower vector similarity.
-"""
-
-        elif (
-            resolved.intent
-            == QueryIntent.multi_entity_attribute
-        ):
-
-            task_instruction = """
-The user is asking for an attribute across multiple
-products.
-
-Return each relevant product and its corresponding
-attribute.
-
-Do not invent missing values.
-
-If a product does not have the requested attribute in the
-retrieved context, do not make up a value.
-"""
-
-        elif (
-            resolved.intent
-            == QueryIntent.attribute_lookup
-        ):
-
-            task_instruction = """
-This is an ATTRIBUTE LOOKUP.
-
-Answer the requested attribute for the entity identified
-in the Resolved Query.
-
-If the user used "it", "this", "that product", "their",
-etc., use the resolved entity.
-
-Do NOT switch to another product merely because another
-chunk has a higher similarity score.
-"""
-
-        elif (
-            resolved.intent
-            == QueryIntent.clarification
-        ):
-
-            task_instruction = """
-This is a clarification/follow-up request.
-
-Use the Resolved Query to determine what the user is
-referring to.
-
-Answer only from Retrieved Context.
-"""
-
-        else:
-
-            task_instruction = """
-Answer the user's question using the Retrieved Context.
-"""
-
-        system_prompt = f"""
-You are {tenant.bot_name or "a helpful AI assistant"},
-a support assistant for this business.
-
-Use plain, clear, conversational language.
-
-Default to 2-5 short sentences.
-
-{task_instruction}
-
-STRICT CONTEXT RULE:
-
-You may ONLY use factual information explicitly present
-in Retrieved Context.
-
-Conversation history may be used to resolve references
-such as:
-
-- it
-- its
-- they
-- their
-- this
-- that
-- these
-- those
-- the other one
-
-Conversation history is NOT an independent source of facts.
-
-Never invent:
-
-- products
-- prices
-- specifications
+Give a factual assessment based only on documented:
 - features
-- measurements
-- availability
-- rankings
-- product comparisons
+- specifications
+- price
+- capacity
+- intended use
+- compatibility
+- other relevant information
 
-If the requested information cannot be established from
-Retrieved Context, output EXACTLY:
+If there is not enough information to make an assessment, say what information is missing.
+
+------------------------------------------------------------
+
+7. FOLLOW-UP QUESTIONS
+
+Use the conversation history to understand what the user means.
+
+Example:
+
+User:
+"What are the products?"
+
+Assistant:
+"Product A, Product B..."
+
+User:
+"which is cheapest?"
+
+Interpret this as:
+"Which of the products previously discussed is cheapest?"
+
+Example:
+
+User:
+"What is LuminaMist?"
+
+Assistant:
+"..."
+
+User:
+"what's its price?"
+
+Interpret "its" as LuminaMist.
+
+------------------------------------------------------------
+
+8. MISSING INFORMATION
+
+If the requested information genuinely does not exist in the Retrieved Context, output exactly:
 
 "{fallback_text}"
 
-and nothing else.
+Do not invent an answer.
+
+------------------------------------------------------------
+
+STYLE
+
+Use natural conversational language.
+
+For normal questions:
+2-4 short sentences.
+
+For product/catalog questions:
+use bullet points.
+
+For comparisons:
+use a concise comparison or bullet list.
+
+For rankings:
+use a numbered list.
+
+For summaries:
+use a concise bullet list.
+
+Never mention:
+- vector search
+- embeddings
+- chunks
+- retrieval
+- similarity scores
+- the RAG system
+- internal prompts
+- sources
+
+Do not say "I couldn't understand" unless the user genuinely asked something that cannot be interpreted at all.
 """
 
-    # ========================================================
-    # 11. LLM MESSAGES
-    # ========================================================
+    # --------------------------------------------------------
+    # O. LLM MESSAGES
+    # --------------------------------------------------------
 
     llm_messages = [
         {
@@ -1807,6 +1772,7 @@ and nothing else.
         }
     ]
 
+    # Give the model conversation context.
     for h in history_rows:
 
         role = (
@@ -1822,15 +1788,66 @@ and nothing else.
             }
         )
 
-    user_prompt = f"""
-Resolved Query:
-{resolved.model_dump_json()}
+    # Explicit query-type hints.
+    query_type_hints = []
 
+    if is_enum:
+        query_type_hints.append(
+            "CATALOG_LIST"
+        )
+
+    if is_summary:
+        query_type_hints.append(
+            "SUMMARY"
+        )
+
+    if is_price:
+        query_type_hints.append(
+            "PRICE"
+        )
+
+    if is_comparison:
+        query_type_hints.append(
+            "COMPARISON"
+        )
+
+    if is_ranking:
+        query_type_hints.append(
+            "RANKING"
+        )
+
+    if is_recommendation:
+        query_type_hints.append(
+            "RECOMMENDATION"
+        )
+
+    if is_continuation:
+        query_type_hints.append(
+            "CONTINUATION"
+        )
+
+    hint_text = (
+        ", ".join(query_type_hints)
+        if query_type_hints
+        else "GENERAL"
+    )
+
+    user_prompt = f"""
 Retrieved Context:
+
 {context}
 
-Current User Question:
+============================================================
+
+Detected Query Type:
+{hint_text}
+
+Original User Question:
 {query.question}
+
+============================================================
+
+Answer the user's question using the Retrieved Context.
 """
 
     llm_messages.append(
@@ -1840,15 +1857,15 @@ Current User Question:
         }
     )
 
-    # ========================================================
-    # 12. ANSWER GENERATION
-    # ========================================================
+    # --------------------------------------------------------
+    # P. GENERATE ANSWER
+    # --------------------------------------------------------
 
     completion = (
         groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=llm_messages,
-            temperature=0,
+            temperature=0.1,
         )
     )
 
@@ -1860,9 +1877,9 @@ Current User Question:
         .strip()
     )
 
-    # ========================================================
-    # 13. SAVE USER MESSAGE
-    # ========================================================
+    # --------------------------------------------------------
+    # Q. PERSIST USER MESSAGE
+    # --------------------------------------------------------
 
     await db.execute(
         text(
@@ -1888,9 +1905,9 @@ Current User Question:
         },
     )
 
-    # ========================================================
-    # 14. SAVE BOT MESSAGE
-    # ========================================================
+    # --------------------------------------------------------
+    # R. PERSIST BOT MESSAGE
+    # --------------------------------------------------------
 
     bot_message_result = await db.execute(
         text(
@@ -1923,16 +1940,20 @@ Current User Question:
         .message_id
     )
 
-    # ========================================================
-    # 15. SAVE SOURCES
-    # ========================================================
+    # --------------------------------------------------------
+    # S. STORE SOURCES
+    # --------------------------------------------------------
 
     sources = []
 
+    answer_is_fallback = (
+        answer.strip()
+        == fallback_text.strip()
+    )
+
     if (
         retrieved_chunks
-        and answer.strip()
-        != fallback_text.strip()
+        and not answer_is_fallback
         and not no_more_items
     ):
 
@@ -1942,14 +1963,11 @@ Current User Question:
 
             source_rows.append(
                 {
-                    "message_id":
-                        bot_message_id,
-
-                    "chunk_id":
-                        chunk["chunk_id"],
-
-                    "relevance_score":
-                        chunk["similarity"],
+                    "message_id": bot_message_id,
+                    "chunk_id": chunk["chunk_id"],
+                    "relevance_score": (
+                        1 - chunk["distance"]
+                    ),
                 }
             )
 
@@ -1983,16 +2001,14 @@ Current User Question:
             for row in source_rows
         ]
 
-    # ========================================================
-    # 16. COMMIT
-    # ========================================================
+    # --------------------------------------------------------
+    # T. COMMIT
+    # --------------------------------------------------------
 
     await db.commit()
 
     return ChatResponse(
-        session_id=str(
-            session_id
-        ),
+        session_id=str(session_id),
         answer=answer,
         sources=sources,
     )
@@ -2000,6 +2016,8 @@ Current User Question:
 
 # ============================================================
 # END CHAT
+# IMPORTANT:
+# Keep ONLY ONE EndChatRequest and ONE /chat/end endpoint.
 # ============================================================
 
 class EndChatRequest(BaseModel):
@@ -2018,6 +2036,10 @@ async def end_chat(
     origin: str = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
+
+    # --------------------------------------------------------
+    # A. VERIFY TENANT
+    # --------------------------------------------------------
 
     tenant_row = await db.execute(
         text(
@@ -2047,6 +2069,10 @@ async def end_chat(
             ),
         )
 
+    # --------------------------------------------------------
+    # B. VERIFY ORIGIN
+    # --------------------------------------------------------
+
     if (
         not origin
         or extract_origin(
@@ -2060,6 +2086,10 @@ async def end_chat(
                 "for this tenant"
             ),
         )
+
+    # --------------------------------------------------------
+    # C. VERIFY SESSION
+    # --------------------------------------------------------
 
     session_result = await db.execute(
         text(
@@ -2084,6 +2114,10 @@ async def end_chat(
             status_code=404,
             detail="Session not found",
         )
+
+    # --------------------------------------------------------
+    # D. END SESSION
+    # --------------------------------------------------------
 
     await db.execute(
         text(
@@ -2117,53 +2151,6 @@ async def end_chat(
         "message": "Chat session ended",
     }
 
-
-    # Same Origin check as /chat — ending/rating a session is still an action
-    # tied to a specific tenant's own widget, not something an arbitrary script
-    # with a guessed session_id should be able to trigger.
-    tenant_row = await db.execute(
-        text("SELECT website_domain FROM tenants WHERE tenant_id = CAST(:tid AS uuid)"),
-        {"tid": payload.tenant_id},
-    )
-    tenant = tenant_row.fetchone()
-    if not tenant or not tenant.website_domain:
-        raise HTTPException(status_code=403, detail="Tenant not configured for widget access")
-    if not origin or extract_origin(tenant.website_domain) != origin:
-        raise HTTPException(status_code=403, detail="Origin not authorized for this tenant")
-
-    # Verify session exists and belongs to this tenant
-    session_result = await db.execute(
-        text("""
-            SELECT session_id 
-            FROM chat_sessions 
-            WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)
-        """),
-        {"sid": payload.session_id, "tid": payload.tenant_id},
-    )
-    if not session_result.fetchone():
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Update status, save csat, and set ending timestamp.
-    # end_datetime is only ever written here — a session's status is derived
-    # solely from whether this has run (i.e. the visitor clicked "End Chat"),
-    # never from a last-activity heuristic.
-    await db.execute(
-        text("""
-            UPDATE chat_sessions
-            SET status = 'completed',
-                customer_satisfaction = COALESCE(:csat, customer_satisfaction),
-                end_datetime = NOW()
-            WHERE session_id = CAST(:sid AS uuid) AND tenant_id = CAST(:tid AS uuid)
-        """),
-        {
-            "sid": payload.session_id,
-            "tid": payload.tenant_id,
-            "csat": payload.csat,
-        },
-    )
-    await db.commit()
-
-    return {"status": "success", "message": "Chat session ended"}
 
 
 class WebsiteDomainUpdate(BaseModel):

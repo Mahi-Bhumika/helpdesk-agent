@@ -270,6 +270,7 @@ async def create_tenant(
         "tenant_id": new_tenant.tenant_id,
         "email": tenant.owner_email,
         "password_hash": "MANAGED_BY_SUPABASE_AUTH",
+        "name": new_tenant.company_name
     })
     await db.commit()
     return dict(new_tenant._mapping)

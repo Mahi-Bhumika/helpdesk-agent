@@ -1,16 +1,12 @@
 import asyncio
 import difflib
+import json
 import os as os_module
 import re
 import tempfile
 import time
-from urllib.parse import urlparse
-
-import json
-import re
 from enum import Enum
-from typing import Any
-
+from urllib.parse import urlparse
 
 from fastapi import (
     Depends,
@@ -822,7 +818,7 @@ Return ONLY valid JSON matching the requested schema.
 
         return resolved
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
 
         print(
             f"[DEBUG] Query resolver failed: {e}"
@@ -2120,18 +2116,8 @@ async def end_chat(
         "status": "success",
         "message": "Chat session ended",
     }
-class EndChatRequest(BaseModel):
-    session_id: str
-    tenant_id: str
-    csat: int | None = Field(None, ge=1, le=5)
 
 
-@app.post("/chat/end")
-async def end_chat(
-    payload: EndChatRequest,
-    origin: str = Header(None),
-    db: AsyncSession = Depends(get_db),
-):
     # Same Origin check as /chat — ending/rating a session is still an action
     # tied to a specific tenant's own widget, not something an arbitrary script
     # with a guessed session_id should be able to trigger.

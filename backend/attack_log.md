@@ -180,3 +180,68 @@
 | supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
 | supabase_direct | message_sources | write | **PASS** | blocked by RLS policy (403) |
 | fastapi | chat_sessions+messages | read+write | **PASS** | rejected (403) — auth check is working |
+
+## Run — 2026-09-28 17:15 UTC
+
+| Path | Table | Op | Status | Detail |
+|---|---|---|---|---|
+| supabase_direct | tenants | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | users | read | **PASS** | 0 rows cross-tenant; 2 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | documents | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | document_chunks | read | **PASS** | 0 rows cross-tenant; 6 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | chat_sessions | read | **PASS** | 0 rows cross-tenant; 27 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | messages | read | **PASS** | 0 rows cross-tenant; 219 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | end_users | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | message_sources | read | **CHECK** | 0 rows for BOTH victim's and attacker's own message_id (8f0f424f-2b6c-4301-900e-a6a2ede17b57) — can't confirm real isolation vs. the join policy being broken/missing entirely, not just correctly blocking cross-tenant access. Confirm via the Table Editor that TENANT_A_MESSAGE_ID actually has a message_sources row. |
+| supabase_direct | documents | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | document_chunks | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | chat_sessions | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | message_sources | write | **PASS** | blocked by RLS policy (403) |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | unexpected status 404: Not Found
+ |
+
+## Run — 2026-09-28 17:22 UTC
+
+| Path | Table | Op | Status | Detail |
+|---|---|---|---|---|
+| supabase_direct | tenants | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | users | read | **PASS** | 0 rows cross-tenant; 2 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | documents | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | document_chunks | read | **PASS** | 0 rows cross-tenant; 6 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | chat_sessions | read | **PASS** | 0 rows cross-tenant; 27 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | messages | read | **PASS** | 0 rows cross-tenant; 219 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | end_users | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | message_sources | read | **PASS** | 0 rows for victim's message_id fb6550e1-a0f3-4423-9e51-79350b4eb1d9; 5 row(s) of own message_id c483c040-b760-43f3-b2da-bad13bc3975f confirmed readable — real join-based isolation, not a blanket lockout |
+| supabase_direct | documents | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | document_chunks | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | chat_sessions | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | message_sources | write | **PASS** | blocked by RLS policy (403) |
+| fastapi | chat_sessions+messages | read+write | **CHECK** | unexpected status 404: Not Found
+ |
+
+## Run — 2026-09-28 17:23 UTC
+
+| Path | Table | Op | Status | Detail |
+|---|---|---|---|---|
+| supabase_direct | tenants | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | users | read | **PASS** | 0 rows cross-tenant; 2 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | documents | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | document_chunks | read | **PASS** | 0 rows cross-tenant; 6 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | chat_sessions | read | **PASS** | 0 rows cross-tenant; 27 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | messages | read | **PASS** | 0 rows cross-tenant; 219 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | end_users | read | **PASS** | 0 rows cross-tenant; 1 row(s) of own data confirmed readable — real isolation, not a blanket lockout |
+| supabase_direct | message_sources | read | **PASS** | 0 rows for victim's message_id fb6550e1-a0f3-4423-9e51-79350b4eb1d9; 5 row(s) of own message_id c483c040-b760-43f3-b2da-bad13bc3975f confirmed readable — real join-based isolation, not a blanket lockout |
+| supabase_direct | documents | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | document_chunks | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | chat_sessions | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | messages | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | end_users | write | **PASS** | blocked by RLS policy (403) |
+| supabase_direct | message_sources | write | **PASS** | blocked by RLS policy (403) |
+| fastapi | chat_sessions+messages | read+write | **PASS** | rejected (403) — auth check is working |

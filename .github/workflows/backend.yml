@@ -2,15 +2,16 @@ name: Backend CI
 
 on:
   pull_request:
-    paths:
-      - "backend/**"
+    branches: [main]
   push:
     branches: [main]
     paths:
       - "backend/**"
+      - ".github/workflows/backend.yml"
 
 jobs:
   test:
+    name: Backend tests
     runs-on: ubuntu-latest
 
     steps:
@@ -20,12 +21,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
         working-directory: backend
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+          pip install ruff
+
+      - name: Lint with Ruff
+        working-directory: backend
+        run: ruff check .
 
       - name: Build Docker image (sanity check the Dockerfile itself)
         run: docker build -t helpdesk-backend ./backend
@@ -33,10 +41,8 @@ jobs:
       - name: Run smoke tests against a live uvicorn instance
         working-directory: backend
         env:
-          # Loaded from repo secrets — Settings > Secrets and variables > Actions.
-          # DATABASE_URL and SUPABASE_URL point at real Supabase deliberately —
-          # smoke tests only SELECT, never write, and TEST_TENANT_ID's real
-          # embedded documents only exist there, not in a disposable CI database.
+          # DATABASE_URL and SUPABASE_URL point at real Supabase deliberately:
+          # TEST_TENANT_ID's real embedded documents only exist there.
           TEST_BASE_URL: http://localhost:8000
           TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
           TEST_ORIGIN: ${{ secrets.TEST_ORIGIN }}

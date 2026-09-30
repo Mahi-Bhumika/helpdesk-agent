@@ -733,6 +733,17 @@ _CONTINUATION_TRIGGERS = [
 def is_enumeration_query(question: str) -> bool:
     return bool(_ENUMERATION_PATTERN.search(question))
 
+def expand_retrieval_query(question: str) -> str:
+    if is_enumeration_query(question):
+        return (
+            f"{question}\n"
+            "Interpret this as a request for the business's "
+            "complete available product, service, offering, "
+            "or catalog information."
+        )
+
+    return question
+
 
 def is_summary_query(question: str) -> bool:
     return bool(_SUMMARY_PATTERN.search(question))
@@ -1257,7 +1268,9 @@ async def chat(
     # F. REWRITE FOLLOW-UPS
     # --------------------------------------------------------
 
-    retrieval_query_text = query.question
+    retrieval_query_text = expand_retrieval_query(
+        query.question
+    )
 
     if _needs_query_rewrite(
         query.question,
@@ -1266,10 +1279,11 @@ async def chat(
 
         retrieval_query_text = (
             _rewrite_query_for_retrieval(
-                query.question,
+                retrieval_query_text,
                 history_rows,
             )
         )
+
 
         print(
             "[DEBUG] Rewritten query: "

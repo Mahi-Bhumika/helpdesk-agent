@@ -17,7 +17,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
+from groq import APIStatusError, Groq
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,7 +50,6 @@ class Document(BaseModel):
     id: int | None = None
     title: str
     content: str
-
 
 
 @app.get("/")
@@ -112,7 +111,8 @@ async def update_document(
     await db.commit()
     return dict(result.fetchone()._mapping)
 
-#deleting a document
+
+# deleting a document
 @app.delete("/documents/{document_id}")
 async def delete_document(
     document_id: str,
@@ -159,6 +159,7 @@ async def delete_document(
 
     await db.commit()
     return {"status": "deleted", "document_id": document_id}
+
 
 # POST — create a new document
 class DocumentCreate(BaseModel):
@@ -275,6 +276,7 @@ async def create_tenant(
     await db.commit()
     return dict(new_tenant._mapping)
 
+
 MAX_CHUNKS_PER_UPLOAD = 65
 
 
@@ -386,6 +388,7 @@ async def upload_document(
         "chunks_inserted": len(chunks),
     }
 
+
 def extract_origin(url_or_domain: str) -> str:
     """Normalizes domain or full URL down to scheme://host."""
     if not url_or_domain:
@@ -398,14 +401,7 @@ def extract_origin(url_or_domain: str) -> str:
 
 # ============================================================
 # RAG CHAT PIPELINE
-# Replace your existing classification/retrieval + /chat code
-# with this entire block.
 # ============================================================
-
-
-from fastapi import Depends
-from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # ============================================================
 # 1. SMALLTALK PATTERNS
@@ -963,6 +959,14 @@ WIDE_THRESHOLD = 0.12
 CATALOG_TOP_K = 50
 CATALOG_THRESHOLD = 0.08
 
+# Hard cap on retrieved-context size sent to the LLM. Keeps a single request
+# under Groq's per-request/per-minute token limits. Raise to ~10000 on a paid tier.
+MAX_CONTEXT_TOKENS = 4000
+
+
+def approx_tokens(s: str) -> int:
+    return len(s) // 4
+
 
 # ============================================================
 # 5. REQUEST / RESPONSE MODELS
@@ -1408,24 +1412,33 @@ async def chat(
             )
 
     # --------------------------------------------------------
-    # L. BUILD CONTEXT
+    # L. BUILD CONTEXT (with a hard token budget)
+    # --------------------------------------------------------
+    #
+    # Chunks arrive ranked best-first, so filling until the budget
+    # is hit keeps the most relevant ones. Reassigning
+    # retrieved_chunks means the sources logged later match exactly
+    # what the LLM actually saw.
     # --------------------------------------------------------
 
     if retrieved_chunks:
 
-        context_parts = []
+        kept, context_parts, used = [], [], 0
 
-        for index, chunk in enumerate(
-            retrieved_chunks,
-            start=1,
-        ):
+        for chunk in retrieved_chunks:
 
+            cost = approx_tokens(chunk["chunk_text"]) + 10
+
+            if kept and used + cost > MAX_CONTEXT_TOKENS:
+                break
+
+            kept.append(chunk)
             context_parts.append(
-                
-                    f"[SOURCE {index}]\n"
-                    f"{chunk['chunk_text']}"
-                
+                f"[SOURCE {len(kept)}]\n{chunk['chunk_text']}"
             )
+            used += cost
+
+        retrieved_chunks = kept
 
         context = "\n\n---\n\n".join(
             context_parts
@@ -1765,8 +1778,8 @@ Do not say "I couldn't understand" unless the user genuinely asked something tha
         }
     ]
 
-    # Give the model conversation context.
-    for h in history_rows:
+    # Give the model conversation context (trimmed to keep requests small).
+    for h in history_rows[-6:]:
 
         role = (
             "user"
@@ -1777,7 +1790,7 @@ Do not say "I couldn't understand" unless the user genuinely asked something tha
         llm_messages.append(
             {
                 "role": role,
-                "content": h.content,
+                "content": h.content[:800],
             }
         )
 
@@ -1854,21 +1867,21 @@ Answer the user's question using the Retrieved Context.
     # P. GENERATE ANSWER
     # --------------------------------------------------------
 
-    completion = (
-        groq_client.chat.completions.create(
+    try:
+        completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=llm_messages,
             temperature=0.1,
+            max_completion_tokens=1000,
         )
-    )
-
-    answer = (
-        completion
-        .choices[0]
-        .message
-        .content
-        .strip()
-    )
+        answer = completion.choices[0].message.content.strip()
+    except APIStatusError as e:
+        # 413 = request too large, 429 = rate limited. Give the visitor the
+        # tenant's fallback message instead of surfacing a 500.
+        if e.status_code in (413, 429):
+            answer = fallback_text
+        else:
+            raise
 
     # --------------------------------------------------------
     # Q. PERSIST USER MESSAGE
@@ -2145,7 +2158,6 @@ async def end_chat(
     }
 
 
-
 class WebsiteDomainUpdate(BaseModel):
     website_domain: str
 
@@ -2419,6 +2431,7 @@ async def get_session_messages(
         m["sources"] = sources_by_message.get(str(m["message_id"]), [])
 
     return messages
+
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():

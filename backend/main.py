@@ -733,6 +733,27 @@ _CONTINUATION_TRIGGERS = [
 def is_enumeration_query(question: str) -> bool:
     return bool(_ENUMERATION_PATTERN.search(question))
 
+_OFFERING_QUERY_PATTERN = re.compile(
+    r"\b("
+    r"do\s+you\s+(?:make|sell|offer|provide|carry|have)|"
+    r"do\s+you\s+have|"
+    r"is\s+(?:this|that|it)\s+available|"
+    r"is\s+.*\s+available|"
+    r"can\s+i\s+(?:get|buy|order|purchase)|"
+    r"can\s+you\s+(?:make|provide|supply|do)|"
+    r"are\s+.*\s+available|"
+    r"do\s+you\s+provide"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_offering_query(question: str) -> bool:
+    return bool(
+        _OFFERING_QUERY_PATTERN.search(question)
+    )
+
+
 def expand_retrieval_query(question: str) -> str:
     if is_enumeration_query(question):
         return (
@@ -742,7 +763,16 @@ def expand_retrieval_query(question: str) -> str:
             "or catalog information."
         )
 
+    if is_offering_query(question):
+        return (
+            f"{question}\n"
+            "Check the business's products, services, offerings, "
+            "catalog, menu, or available inventory to determine "
+            "whether the requested item or service is available."
+        )
+
     return question
+
 
 
 def is_summary_query(question: str) -> bool:
@@ -1240,9 +1270,14 @@ async def chat(
         query.question
     )
 
+    is_offering = is_offering_query(
+        query.question
+    )
+
     is_summary = is_summary_query(
         query.question
     )
+
 
     is_price = is_price_query(
         query.question
@@ -1296,12 +1331,14 @@ async def chat(
 
     catalog_wide_query = (
         is_enum
+        or is_offering
         or is_summary
         or is_ranking
         or is_comparison
         or is_price
         or is_continuation
     )
+
 
     if catalog_wide_query:
 
@@ -1424,6 +1461,19 @@ async def chat(
                 f"accepted similarity="
                 f"{best_similarity:.3f}"
             )
+
+            print(
+                f"[DEBUG] Query: {retrieval_query_text}"
+            )
+
+            print(
+                f"[DEBUG] Best similarity: {best_similarity:.3f}"
+            )
+
+            print(
+                f"[DEBUG] Best chunk: {best.chunk_text[:500]}"
+            )
+
 
     # --------------------------------------------------------
     # L. BUILD CONTEXT (with a hard token budget)
@@ -1583,6 +1633,38 @@ Do NOT assume that one product is better than another unless the retrieved infor
 ============================================================
 QUERY-SPECIFIC BEHAVIOR
 ============================================================
+
+0. PRODUCT / SERVICE AVAILABILITY QUESTIONS
+
+If the user asks whether the business makes, sells, offers,
+provides, carries, has, or can supply a particular product,
+service, item, or offering:
+
+Check the Retrieved Context for that specific product or service.
+
+If it is explicitly present in the Retrieved Context, answer that
+it is available and provide the relevant documented information.
+
+If it is explicitly stated as unavailable, say so.
+
+If the requested product or service is not found in the Retrieved
+Context, use the fallback response.
+
+Do not assume that an item is available merely because it is
+similar to another item.
+
+Do not invent availability.
+
+Examples:
+
+"Do you make X?"
+"Do you sell X?"
+"Do you offer X?"
+"Can I buy X?"
+"Is X available?"
+"Can you provide X?"
+
+All of these are availability questions.
 
 1. PRODUCT / CATALOG QUESTIONS
 
@@ -1970,6 +2052,7 @@ Answer the user's question using the Retrieved Context.
         answer.strip()
         == fallback_text.strip()
     )
+
 
     if (
         retrieved_chunks

@@ -808,25 +808,27 @@
       }
     }
 
-    function scrollToBottom() {
-      function jump(smooth) {
-        var top = panelBody.scrollHeight;
-        if (smooth && typeof panelBody.scrollTo === "function") {
-          panelBody.scrollTo({ top: top, behavior: "smooth" });
-        } else {
-          panelBody.scrollTop = top;
-        }
+    function scrollBodyTo(top) {
+      if (typeof panelBody.scrollTo === "function") {
+        panelBody.scrollTo({ top: top, behavior: "smooth" });
+      } else {
+        panelBody.scrollTop = top;
       }
-      // wait for layout, then glide down
-      requestAnimationFrame(function () { jump(true); });
-      // safety net: fonts / animations / late layout can change the height, so re-check once
-      setTimeout(function () {
-        if (panelBody.scrollHeight - panelBody.scrollTop - panelBody.clientHeight > 2) jump(false);
-      }, 350);
     }
 
-    function scrollToMessage() {
-      scrollToBottom();
+    function scrollToMessage(wrap, sender) {
+      requestAnimationFrame(function () {
+        if (sender === "bot") {
+          var bodyRect = panelBody.getBoundingClientRect();
+          var wrapRect = wrap.getBoundingClientRect();
+          // long reply: start at its first line instead of dropping the reader at the end
+          if (wrapRect.height > panelBody.clientHeight - 24) {
+            scrollBodyTo(panelBody.scrollTop + (wrapRect.top - bodyRect.top) - 12);
+            return;
+          }
+        }
+        scrollBodyTo(panelBody.scrollHeight);
+      });
     }
 
     function appendMessage(text, sender) {

@@ -929,12 +929,17 @@
       }, 160);
     }
 
-    function showCsatScreen() {
-      messagesEl.hidden = true;
-      footerEl.style.display = "none";
-      endBtn.style.display = "none";
-      csatView.hidden = false;
-    }
+  function showCsatScreen() {
+    messagesEl.hidden = true;
+    footerEl.style.display = "none";
+    endBtn.style.display = "none";
+    csatView.hidden = false;
+
+    // wait for layout, then scroll so the stars are fully visible
+    requestAnimationFrame(function () {
+      panelBody.scrollTo({ top: panelBody.scrollHeight, behavior: "smooth" });
+    });
+  }
 
     function resetWidgetState() {
       sessionId = null;

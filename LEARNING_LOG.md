@@ -1348,3 +1348,292 @@ Members RLS turned out to be a non-issue on closer inspection — worth
 remembering as its own small lesson: confirm the actual current state
 (`pg_policies`, in this case) before treating a suspected gap as
 confirmed and building a fix for it blind.
+
+
+# Week 7 — Wednesday to Friday Session Log (Bhumika)
+ 
+*CI/CD setup, Docker debugging, deploy verification, and secrets audit — covers everything worked through in this session.*
+ 
+---
+ 
+## Wednesday — Backend CI + Docker Compose
+ 
+### `backend.yml` — ruff lint fixes
+Three separate `ruff check .` errors, fixed one at a time:
+- **F821** — `Optional` used in `main.py` (`classify_smalltalk`'s return type) but never imported. Fixed with `from typing import Optional`. Flagged to Mahi first since it's her file.
+- **BLE001** — blind `except Exception` around the Groq query-rewrite call. Kept deliberately broad (any rewrite failure should fall back to the raw question) and justified with an inline `# noqa: BLE001` comment instead of narrowing the catch.
+- **I001** — unsorted imports in `test_smoke.py`. Fixed with `ruff check --fix .`.
+ 
+### `backend.yml` — B008 false-positive wave
+A second, much larger batch: **30 B008 errors**, one for every `Depends()`/`File()`/`Form()` default across `auth.py` and `main.py`. Root cause: this is just how FastAPI's dependency injection works — ruff's mutable-default check doesn't know FastAPI's `Depends` pattern is safe. Fixed properly (not a blanket ignore) via `pyproject.toml`:
+```toml
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Form", "fastapi.File", "fastapi.Cookie"]
+```
+This keeps B008 live for a genuine mutable-default bug elsewhere, while clearing all 30 FastAPI false positives at once. Config-only change, no route logic touched.
+ 
+### Docker Compose — real debugging chain
+1. **Docker Desktop not running** — `npipe:////./pipe/dockerDesktopLinuxEngine` error. Fixed by launching Docker Desktop and waiting for it to fully start.
+2. **Real schema bug**: `gen_random_bytes()` (used for `invite_token`) requires the `pgcrypto` extension, which `schema.sql` never created — only `vector` was enabled. Fix: add `create extension if not exists pgcrypto;` alongside the existing `vector` line.
+3. **First fix attempt silently didn't take** — the line was never actually saved to the file, but `docker-compose up` still reported `db-1: Healthy` and the backend started cleanly, because Postgres only runs `schema.sql` against a genuinely empty data directory. The stale volume from the original failed run masked the missing fix completely — nothing in container status, healthcheck, or `/db-check` caught it.
+4. **Real redo**: confirmed the line was actually in the file this time, ran `docker-compose down -v` (confirmed via `docker volume ls` that `helpdesk-agent_pgdata` was actually gone), then `docker-compose up --build` again.
+5. **PowerShell `curl` alias trap**: `curl http://localhost:8000/db-check` triggered an `Invoke-WebRequest` script-parsing prompt instead of running like real curl. Fixed by using `curl.exe` explicitly.
+ 
+### Verified clean
+```
+pg_extension: plpgsql, vector, pgcrypto (3 rows)
+\dt: chat_sessions, document_chunks, documents, end_users,
+     message_sources, messages, tenants, users (8 rows)
+```
+Full Wednesday scope closed. Mahi asked to run the same sequence (`git pull` → `down -v` → `up --build` → both checks) to confirm identical dev environment on her machine.
+ 
+---
+ 
+## Thursday — Vercel Auto-Deploy + CORS Verification
+ 
+### Vercel auto-deploy
+- Initial confusion: recent work had been landing on a `ci-frontend` PR branch, which only produces Preview deployments by design — not a misconfiguration, just nothing had merged to `main` yet.
+- Confirmed readiness before merging PR #16 (delete-document feature): endpoint tested and working, Frontend CI issue from Tuesday resolved, PR showing three green checks.
+- Merged PR #16 → confirmed a real **Production** deployment appeared in Vercel's Deployments tab within seconds → confirmed the live delete-document feature actually worked on the real production URL, not just that the build succeeded.
+ 
+### CORS — investigated and corrected mid-session
+- Initial assumption (mine, incorrectly asserted): a path-aware CORS split existed (wildcard for `/chat`, strict allowlist for dashboard routes), based on Week 3's *originally planned* Option A/B split.
+- Corrected after reading the actual `main.py`: only **one single global `CORSMiddleware` block exists**, `allow_origins=["*"]`, applying to every route — confirmed intentional via an explicit code comment ("Option A — confirmed as the shipped configuration").
+- Real protection for dashboard routes is **JWT auth** (`Depends(get_current_user)`), not CORS — CORS controls which origins can *attempt* a request; auth controls who actually succeeds.
+- `/chat` and `/chat/end` have their own separate, unrelated mechanism: the `extract_origin(tenant.website_domain) != origin` check written directly into the route bodies.
+- **Conclusion: nothing needed for Thursday's CORS check** — the wildcard already covers any production domain automatically. Flagged one minor future consideration to Mahi: `allow_credentials=False` would matter if dashboard auth ever moved from Bearer-token to cookies (it hasn't, so currently a non-issue).
+ 
+---
+ 
+## Friday — Secrets Audit + Env Var Migration
+ 
+### Credential exposure — found and rotated
+- `docker-compose config` output (pasted mid-session for a different purpose) exposed real values: `GROQ_API_KEY`, `SUPABASE_JWT_SECRET`, `SUPABASE_URL`.
+- **Groq key rotated immediately** via Groq's console, updated everywhere it's used.
+- Supabase JWT secret rotation flagged as needing Mahi's input first (used for JWT verification via `PyJWKClient` — rotating without coordination could break active sessions).
+ 
+### Frontend env vars → Vercel
+Moved `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` into Vercel's Environment Variables settings.
+- Hit a real point of confusion: Vercel flagged `NEXT_PUBLIC_API_URL` as set to **Secret** type, which conflicts with the `NEXT_PUBLIC_` prefix (anything with that prefix gets bundled into client-side JS in plain text regardless of the Secret/Config setting — so "Secret" can't actually hide it, it just makes the value unviewable later in the dashboard for no security benefit).
+- Resolved: all three `NEXT_PUBLIC_*` vars set to **Config**, not Secret — matches the existing "public identifier, not a real secret" precedent already established for `tenant_id` back in Week 3.
+- Clarified: Secret vs. Config has zero effect on whether the app actually works — it only controls whether *you* can view the value again later in the dashboard.
+ 
+### `.env.example` — updated
+Backend variables (`DATABASE_URL`, `GROQ_API_KEY`, `SUPABASE_JWT_SECRET`, etc.) added as placeholders alongside the frontend `NEXT_PUBLIC_*` vars.
+ 
+### Git history audit — clean
+```
+git log --all --full-history -- "**/.env"
+```
+Returned empty — no real `.env` file has ever been committed to the repo at any point in history.
+ 
+### Still open
+- **`docker-compose.yml` hardcoding** — the file has real credential values written directly into it (not `${VAR}`-style substitution pulling from `.env`). Flagged to Mahi; not yet confirmed fixed. Worth a follow-up ping rather than assuming it landed.
+- **Supabase JWT secret rotation** — pending Mahi's confirmation it's safe to rotate without breaking active sessions.
+ 
+---
+ 
+## Heading into Saturday
+ 
+Per the Week 7 plan: wire GitHub Actions to gate deployment on CI passing (frontend + backend), then prove the full pipeline end-to-end with a real test PR (PR → checks pass → auto-deploy → verify live). Real gap identified going in: Vercel currently auto-deploys on any push to `main` **independently** of whether `frontend.yml`/`backend.yml` pass — the two systems aren't actually connected yet. Plan is to close that gap via GitHub branch protection (required status checks) rather than fighting Vercel's native Git integration. First step: confirm with Mahi whether PR #16's three green checks were already configured as *required* (blocking) or just informational, before building branch protection from scratch.
+
+# Week 7 — Saturday & Sunday Log (Bhumika)
+
+*Branch protection, required status checks, and independent verification of the live product.*
+
+---
+
+## Saturday — Gating deploys on CI
+
+### The real problem (not the one in the plan)
+The plan said "wire GitHub Actions to auto-deploy frontend to Vercel." That was already a non-task: Vercel's native Git integration had been auto-deploying `main` since Thursday. The actual gap was that CI and deploy were **not connected**. `frontend.yml` and `backend.yml` ran green, but they were informational only, so nothing stopped a red PR from merging and Vercel deploying it.
+
+Confirmed with Mahi before touching settings:
+- PR #16's three green checks were **informational**, not required, so branch protection was genuinely new work.
+- **Render was already gated**: it only deploys when the backend workflow passes. Backend side needed nothing.
+- Vercel was the only ungated side, and it inherits safety automatically once `main` can only receive green code.
+
+### What got built
+- Branch protection rule on `main`: pull request required, required status checks (`Backend tests`, `Frontend lint and build`), branches must be up to date, and **do not allow bypassing** so admins (me included) can't skip it.
+- Gave both jobs explicit `name:` fields so the required check names are readable and stable.
+- Removed the `paths:` filter from the `pull_request` trigger in both workflows (kept on `push`).
+- Merged two versions of `backend.yml` (Mahi's working one and my draft) into one, using hers as the base.
+- Fixed a recurring `I001` unsorted-imports lint error in `tests/test_smoke.py`.
+
+### Proven, not assumed
+- Opened a README-only test PR: both required checks appeared and ran, and the merge button stayed **blocked** until both went green.
+- Tried a direct push to `main` from the terminal. Rejected:
+  ```
+  GH006: Protected branch update failed for refs/heads/main.
+  - Changes must be made through a pull request.
+  - 2 of 2 required status checks are expected.
+  ```
+  Two separate protections, both visibly working.
+
+### Concepts learned
+- **Required vs informational checks.** A green check on a PR means nothing for safety unless the branch rule marks it required. Same visual, completely different guarantee.
+- **`paths:` filters + required checks = permanent hang.** If a workflow only triggers on certain paths and is marked required, any PR that doesn't touch those paths waits forever on "Expected: waiting for status." The fix is dropping the filter on `pull_request`, or requiring a single always-running gate job.
+- **Required check names are the job `name:` (or job ID), not the workflow name.** And they only become searchable in the branch protection box after the check has reported at least once recently, so the workflow PR had to be merged *before* the rule could reference it. Renaming a job after requiring it leaves the old name stuck on "Expected."
+- **CI gates the merge, not the deploy.** Vercel's native deploy doesn't know CI exists. Safety comes from making `main` only accept green code, not from wiring the two systems together.
+- **Two runs on merge are normal.** One was the Vercel/Render deploy, the other was Backend CI re-running via its `push` trigger on `main`.
+- **Merged PR branches don't delete themselves** unless "Automatically delete head branches" is on. Enabled it.
+- **`git reset --hard origin/main`** makes local `main` an exact copy of the remote: the right cleanup after a rejected push left a stray local commit, and destructive if there is anything uncommitted worth keeping.
+
+### Bugs found and fixed
+1. **YAML indentation errors** in both workflows: `name:` sat at the wrong level (directly under `jobs:` in one, level with the job ID in the other), which would have failed parsing.
+2. **`I001` import order** in `test_smoke.py`, the same error fixed on Wednesday, reappearing because Mahi's copy predated that fix. The new lint step caught it, which is the gate doing its job.
+3. **Wrong Python version risk**: my draft used 3.14, which heavy dependencies like `onnxruntime` may not support yet. Matched Mahi's 3.13.
+4. **Unused Postgres service container** in my draft: the smoke tests need `TEST_TENANT_ID`'s real embedded documents, which only exist in real Supabase, so an empty CI database would have failed `/chat`. Dropped it.
+5. **`sleep 3` before smoke tests** replaced with Mahi's `/health` polling loop, since a fixed sleep flakes on slow runners.
+
+### Decisions made deliberately
+- Used Mahi's `backend.yml` as the base and layered mine on top, instead of overwriting a working, already-gating file.
+- Accepted a 2m40s backend check as-is. Most of it is dependency install plus an uncached Docker build; optimizing it is not worth the time this week.
+- Flagged to Mahi that CI smoke tests hit real Supabase and `/chat` logs sessions and messages, so each run probably adds rows.
+
+### What confused me
+- Assumed the Saturday task was to build a deploy workflow. It was actually to gate an existing deploy, which is a different job.
+- Briefly thought I had pushed to `main`. The output showed a brand-new branch being created, so nothing hit `main`.
+
+---
+
+## Sunday — Independent verification
+
+### Context
+Mahi ran the full production smoke test herself and also built the external widget page, which was originally my task. Rather than rebuild it, I verified it independently, so the milestone has two sets of eyes instead of one.
+
+### Verified
+- **Widget on the external page:** loads, `widget-config` returns a clean `200`, dark/grey theme applies, and nothing overlaps the host page. Shadow DOM isolation holding on a real external site, not just the test page.
+- **`cross_tenant_attack_test.py` rerun against the live deployment, both paths:** all pass. First full recheck of the auth and RLS layer since the Week 5-6 changes.
+- **Sticky sidebar:** confirmed it actually landed in code (was an open question from Week 6).
+- **`fallback_message`:** confirmed working end to end.
+- **`docker-compose.yml` hardcoded credentials:** fixed.
+
+### Still open
+- **Supabase JWT secret rotation:** asked Mahi whether rotating is safe without breaking active sessions. Waiting on her answer.
+- **`get_widget_config` has no null check:** a nonexistent `tenant_id` would 500 instead of returning 404. Her file, flagged since Week 6.
+
+### Concepts learned
+- **Verification is a separate job from building.** When someone else builds a thing, "it worked for them" isn't the same claim as "I confirmed it works." Testing it from a clean browser and a different vantage point is what turns it into evidence.
+- **A security test that passes once proves little; a rerun after every big change proves the layer still holds.** The attack script was written in Week 4 and only means something because it keeps getting rerun.
+
+---
+
+## Where things stand
+
+- Full pipeline now: PR → required checks (`Backend tests`, `Frontend lint and build`) → merge → Vercel and Render auto-deploy. Direct pushes to `main` are impossible for everyone.
+- Live dashboard, live backend, widget verified on an external site, attack script clean on the live URLs.
+- Carried forward: JWT secret rotation (pending Mahi), the `get_widget_config` 404 fix, and the smoke-tests-write-real-rows question.
+
+
+# Helpdesk Agent — Week 7 Learning Log (Person A / Docker, Render, CI/CD)
+
+*Containerization + secrets hygiene + a real CI/CD pipeline — Mon through Sun*
+
+---
+
+## Summary
+
+Started the week with a working app that deployed by pushing to Render and hoping for the best. Ended it with: a Dockerfile that builds the exact same environment locally, in CI, and in production; a docker-compose setup for local dev without touching real Supabase data; every secret audited and moved to the right place (or correctly *not* treated as a secret); and a GitHub Actions pipeline that runs real smoke tests against real data and only lets Render deploy once they pass. Getting the CI pipeline green took roughly eight separate real bugs, stacked one after another — each fix exposing the next problem underneath it, which turned out to be the most instructive part of the week.
+
+---
+
+## Day 1 (Mon) — Dockerfile + a real pytest suite
+
+- Wrote `backend/Dockerfile` — base image, dependency layer separated from code layer (so edits don't force a full reinstall), shell-form `CMD` so `${PORT}` actually expands for Render
+- Wrote `backend/tests/test_smoke.py` — real HTTP smoke tests against a running instance (`/health`, `/tenants`, `/chat`), not unit tests with mocks, matching what the plan actually asked for
+- **Decision made explicitly**: smoke tests hit a real tenant with real embedded documents, not fake data — this only works if `TEST_TENANT_ID` points at something genuine, a decision that came back around properly on Saturday
+
+## Day 2 (Tue) — Docker wasn't even installed
+
+- **Bug**: `docker` not recognized at all in PowerShell — turned out Docker Desktop was never installed on this machine. Installed it, which pulled in WSL2 as Docker's actual engine on Windows
+- **Bug**: first real build transferred a 633MB build context and took 85+ seconds — `.dockerignore` wasn't being respected. Root cause: Windows saved it as `.dockerignore.txt` (hidden known-extensions setting), so Docker never saw it as the special ignore file it needed to be
+- **Bug**: `numpy==2.5.2` failed to resolve during `pip install` — `requirements.txt` was frozen from a local venv running a newer Python than the Dockerfile's `python:3.11-slim` base image. Fixed by matching the Dockerfile's Python version exactly to the real local version (3.13), not just picking something recent
+- **Bug**: running `docker run` directly (skipping compose) crashed with `RuntimeError: DATABASE_URL is not set` — expected, since `.env.docker` was deliberately built to hold only `GROQ_API_KEY`, with `DATABASE_URL` meant to come from compose instead
+- **Lesson**: a Dockerfile that "builds successfully" isn't proof of anything if the build context itself is silently wrong — always check what's actually being transferred, not just whether the build finishes
+
+## Day 3 (Wed) — docker-compose, and two folders that look alike but aren't
+
+- Wrote `docker-compose.yml` — FastAPI + `pgvector/pgvector:pg16` as a local Postgres, `backend/schema.sql` auto-mounted so a fresh container gets real tables
+- Identified a real, pre-existing gap: `backend/schema.sql` didn't actually exist anywhere in the repo — the real `CREATE TABLE` statements only ever lived in Supabase's SQL Editor history, a gap flagged all the way back in Week 1's study guide and never closed until now
+- Created `backend/.env.docker` — deliberately holding only `GROQ_API_KEY`, never `DATABASE_URL`, so local dev never accidentally touches production credentials
+- **Bug**: confused `.git` (Git's internal database, never touch) with `.github` (where GitHub Actions workflows must live) — the two folders look almost identical at a glance. `.github/workflows/backend.yml` had to be created fresh; it didn't exist yet
+- **Bug**: `docker-compose.yml` and later `.github/workflows/` got placed *inside* `backend/` instead of the repo root — compose's `./backend` build-context reference and GitHub's workflow-discovery both require these one level up, as siblings of `backend/` and `frontend/`, not nested inside either
+
+## Day 4 (Thu) — Render: buildpacks → Dockerfile
+
+- Switched Render's backend service from its default buildpack runtime to building from `backend/Dockerfile` directly, via the dashboard's Build & Deploy settings — existing environment variables carried over untouched
+- Reconfirmed `CORSMiddleware`'s `allow_origins` needed the real production frontend domain(s), not just localhost — this surfaced again, for real, on Sunday
+
+## Day 5 (Fri) — Secrets audit
+
+- Checked this week's own chat history for an accidentally-pasted real secret — specifically, a real Supabase connection string that had been typed into a `docker run -e DATABASE_URL="..."` command earlier in the week. Confirmed it was never actually leaked (the placeholder text was what got run, not a real value)
+- Ran `git log --all --full-history -- backend/.env` to confirm `.env` itself was never committed at any point — clean
+- Cross-checked Render's real environment variables against the local `.env` to catch gaps before they became a repeat of the JWKS surprise from Tuesday — the pooler `DATABASE_URL` was confirmed correct (port `6543`, not `5432`) without needing to touch it
+- **Lesson reinforced**: a `DATABASE_URL` pointing at real Supabase is always a secret; one pointing at a throwaway local/CI Postgres with made-up credentials is not — hardcoding the latter is actually clearer than hiding it behind a secret for no reason
+
+## Day 6 (Sat) — The actual CI/CD pipeline (and eight real bugs to get there)
+
+- **Real find, not part of the plan**: Render now offers a native Auto-Deploy option, **"After CI Checks Pass"** — replaced the originally-planned manual deploy-hook job (`RENDER_DEPLOY_HOOK_URL` + a `deploy:` job in `backend.yml`) with this instead. Simpler, and puts the actual deploy decision in Render's hands rather than GitHub Actions reaching out to trigger it
+- Deleted the now-unused `RENDER_DEPLOY_HOOK_URL` secret and the `deploy:` job it powered
+- **Bug**: `npm run lint` failed on a new, strict ESLint rule (`react-hooks/set-state-in-effect`) flagging a correct, standard "fetch on mount" `useEffect` pattern as a false positive — resolved with a targeted, commented `eslint-disable-next-line`, not a blanket suppression
+- **Bug**: `ruff check` found the same class of bug as Week 1's duplicate `FastAPI()` app — `main.py`'s imports had been pasted in multiple times across different feature additions (`asyncio`, `FastAPI`, `Depends`, `HTTPException`, `Header`, `Query`, `get_current_user`, `decode_jwt` all imported twice). Fixed automatically via `ruff check . --ignore B008 --fix`
+- Derived real values for `TEST_TENANT_ID` and `TEST_ORIGIN` directly from Supabase — picked a real tenant with actual embedded chunks via a `JOIN`/`COUNT` query, then had to trace `/chat`'s actual `extract_origin()` helper function to get the *exact* string format (`https://mahi-bhumika.github.io`, no trailing slash) the Origin check compares against — guessing the format would have produced a confusing 403 that looked like an auth bug but was really a string mismatch
+- **Bug**: CI crashed with `PyJWKClientError: Invalid JWKS URI scheme ''`, even after setting a `JWKS_URL` secret — turned out `auth.py` never reads a `JWKS_URL` env var at all; it *builds* that URL from `SUPABASE_URL`. Setting the wrong-named secret meant the real variable (`SUPABASE_URL`) was still `None`. Fixed by reading `auth.py`'s actual source instead of guessing from the error text alone
+- **Bug**: same numpy/Python-version mismatch from Tuesday, recurring in a *third* separate environment — GitHub Actions' own `setup-python` step was still pinned to 3.11, unrelated to the Dockerfile's already-fixed version. Fixed by matching all three environments (local venv, Docker, CI) to the same Python version
+- **Bug**: `pytest tests/` failed with "file or directory not found" — `test_smoke.py` had been placed directly in `backend/`, not inside `backend/tests/` as the workflow expected
+- Replaced a blind `sleep 3` before running tests with a real poll loop against `/health`, up to 20 seconds — more robust, and it turned a silent failure into a visible "still waiting" log when something was genuinely wrong later that same day
+- **Real, final bugs — not infrastructure this time, actual application behavior**:
+  - `test_tenants_rejects_incomplete_payload` expected `422`, got `401` — correct, current behavior, since Week 4 added auth to `/tenants`; the test was written against pre-Week-4 assumptions and needed updating, not the code
+  - `test_chat_smoke` / `test_chat_rejects_unknown_tenant` both failed with `relation "tenants" does not exist` — the ephemeral CI Postgres service had no schema loaded, and even fixing that wouldn't help, since the real embedded document data these tests need only exists in production Supabase
+  - **Decision**: rather than trying to seed a disposable CI database with real embeddings on every run, pointed CI's `DATABASE_URL` directly at real Supabase instead, and removed the local ephemeral Postgres service from `backend.yml` entirely — a deliberate tradeoff (CI reads real data) accepted because the smoke tests only ever `SELECT`, never write
+  - Updated the unknown-tenant test to expect the real, confirmed `403` "Tenant not configured for widget access" response, read directly from `main.py`'s actual `/chat` code, instead of guessing between 404/200
+
+## Day 7 (Sun) — Production smoke test, and a second Render service appears
+
+- General smoke test (signup → upload → chat → logout/login → analytics) — the CI pipeline itself, having just been fixed, effectively became this test too, since a real merge now runs the same checks
+- **Widget debugging, in stages**:
+  - Netlify-hosted test page's `/chat` call failed outright — DevTools showed a CORS error and a 404 together, which initially looked like Thursday's `allow_origins` task resurfacing
+  - Checked `main.py`'s actual `CORSMiddleware` config directly rather than guessing — it was already `allow_origins=["*"]`, a deliberate, documented tradeoff from earlier work. CORS was a red herring
+  - The real issue: a **second, new Render service** (`helpdesk-agent-1`) had been created and pointed to from the frontend, separate from the original (`helpdesk-agent-9eu9`) — confirmed independently healthy via a direct `curl /health`, ruling out the backend
+  - Root cause, finally: `widget.js` had the old backend URL **hardcoded as its own constant**, separate from whatever had been edited in `index.html` — editing one file never had a chance to fix the other
+  - Found via `git log --all -p -- backend/main.py | Select-String "widget-config"` — while investigating, also surfaced a duplicate `@app.get("/tenants/{tenant_id}/widget-config")` route definition, the same "pasted twice" pattern as Saturday's import bug, this time in a route rather than an import
+- **Lesson**: a brand-new Render service starts genuinely blank — none of Tuesday–Saturday's Docker settings, env vars, or Auto-Deploy configuration carry over automatically just because it's "the same app." Confirmed this new service had all of it set up properly before moving on, rather than assuming.
+
+---
+
+## Bugs found and fixed this week (the real list)
+
+1. `.dockerignore` silently not applied — saved with a hidden `.txt` extension on Windows
+2. Dockerfile's Python version didn't match the local venv's, breaking `numpy` installation
+3. `docker run` (bypassing compose) crashed on missing `DATABASE_URL` — expected, by design
+4. `.git` vs `.github` confusion — workflows initially had nowhere correct to live
+5. `docker-compose.yml` and `.github/workflows/` misplaced inside `backend/` instead of the repo root
+6. Duplicate imports across `main.py`, accumulated from features added across different weeks without checking existing imports first
+7. `JWKS_URL` set as a secret that the code never actually reads — `auth.py` builds that URL from `SUPABASE_URL` instead
+8. Python version mismatch recurring a third time, now in GitHub Actions' own `setup-python` step
+9. `test_smoke.py` placed outside the `tests/` folder the workflow expected
+10. A blind `sleep 3` in CI wasn't long enough for a real server boot on a slower shared runner
+11. Two test assertions written against outdated (pre-Week-4-auth) expected behavior
+12. CI's ephemeral Postgres had no schema and no real tenant data — architecturally, not just a missing step
+13. A duplicated `/tenants/{tenant_id}/widget-config` route definition in `main.py`
+14. `widget.js` hardcoded an old backend URL independent of `index.html`'s config, surviving a URL change everywhere else
+
+---
+
+## Decisions made deliberately this week
+
+- **Render's native "After CI Checks Pass" over a custom GitHub Actions deploy-hook job** — simpler, and puts the deploy trigger in the tool actually responsible for deploying, rather than GitHub Actions reaching out to poke Render.
+- **CI's `DATABASE_URL` points at real Supabase, not a disposable local Postgres** — accepted specifically because the smoke tests are read-only; seeding a fresh database with real embeddings on every single CI run was judged not worth the complexity for what this project actually needs.
+- **A throwaway local/CI `DATABASE_URL` with made-up credentials is hardcoded, not a GitHub secret** — reserving "secret" for values that protect something real (production Supabase, real API keys) keeps the workflow readable and doesn't dilute what "secret" is supposed to signal.
+- **Every ambiguous error this week got traced to its actual source file before being fixed** — repeatedly, guessing from an error message alone (assuming `JWKS_URL` was the right secret name, assuming CORS was the widget's problem) turned out wrong; reading the real code that raised the error was the only reliable way through.
+
+---
+
+## Where things stand at the end of Week 7
+
+- Full Docker parity: the same Dockerfile builds and runs identically on a local machine, inside `docker-compose` for dev, in GitHub Actions for CI, and on Render for production
+- A real CI/CD pipeline: every push runs a genuine build + smoke test against real backend behavior and real data, and Render only deploys once that passes
+- Secrets fully audited: nothing real committed, nothing real pasted into chat, every environment variable accounted for across four separate places it needs to exist (local `.env`, `.env.docker`, GitHub Actions secrets, Render's environment)
+- The widget, embedded on a real external static page, successfully reaching the live backend — the actual demoable milestone the whole project has been building toward
+- Two Render services currently exist (`helpdesk-agent-9eu9` and `helpdesk-agent-1`); worth a deliberate decision on whether to decommission the old one now that the new one is confirmed live and correctly configured, rather than leaving both running indefinitely
